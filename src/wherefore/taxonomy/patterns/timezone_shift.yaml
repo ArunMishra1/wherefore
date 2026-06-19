@@ -1,0 +1,50 @@
+# Reference pattern. If you're adding a new failure pattern, copy this
+# file, rename it (filename stem must equal `id` below), and fill in
+# every field -- the registry will reject anything incomplete or
+# malformed at load time with a clear error.
+
+id: timezone_shift
+display_name: "Timezone Conversion Inconsistency"
+category: temporal
+
+description: >
+  A datetime column was converted between timezones inconsistently --
+  some rows shifted by a timezone offset, others left as-is, or every
+  row shifted by a constant delta that doesn't correspond to any DST
+  transition (suggesting a naive-datetime reinterpretation bug rather
+  than a genuine timezone conversion).
+
+detection_hints:
+  - applies_to_dtypes: ["datetime", "timestamp"]
+    signature: "constant_offset_subset"
+    description: >
+      A subset of mismatched rows in a datetime column differ from
+      their counterpart by the same constant time delta (e.g. every
+      mismatched row is exactly 5:00:00 or 9:00:00 later/earlier).
+
+llm_context: >
+  Common real-world offsets and likely causes: 4 or 5 hours suggests
+  EST/EDT <-> UTC; 9 hours suggests JST <-> UTC; 1 hour with inconsistent
+  application across rows suggests a DST boundary bug rather than a
+  flat conversion. If ALL affected rows share the exact same offset,
+  this points to a systematic conversion step (e.g. one ETL job ran
+  with the wrong configured timezone). If offsets VARY across the
+  affected rows, suspect DST transition handling or mixed source
+  timezones that weren't normalized before migration.
+
+synthetic_corruption:
+  generator: "wherefore.synthetic.corruptors.timezone_shift:apply"
+  params_schema:
+    offset_hours:
+      type: float
+      default: 5.0
+      description: "Hours to shift affected rows by (positive = later)"
+    affected_fraction:
+      type: float
+      default: 0.3
+      description: "Fraction of rows in the target dataset to corrupt"
+
+severity_default: medium
+references:
+  - "https://en.wikipedia.org/wiki/Tz_database"
+  - "https://docs.python.org/3/library/datetime.html#datetime.timezone"
