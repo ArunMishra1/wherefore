@@ -91,13 +91,56 @@ def get_pattern(pattern_id: str) -> PatternDefinition:
     return patterns[pattern_id]
 
 
+# Real pandas/datacompy dtype strings vary by resolution and
+# nullable-variant (e.g. "datetime64[s]", "datetime64[ns]", "Float64"
+# vs "float64") -- but taxonomy YAML files describe dtypes at the
+# FAMILY level ("datetime", "float"), since detection_hints care about
+# "is this datetime-ish" not "is this specifically nanosecond-resolution."
+# This mapping was derived by inspecting real dtype strings pandas
+# actually produces (see project history / tests for the exploration),
+# not guessed in advance -- a naive exact-string match between
+# column_summary's dtype and a YAML's applies_to_dtypes silently
+# matched nothing on real data, since "datetime64[s]" != "datetime".
+_DTYPE_FAMILY_PREFIXES: dict[str, tuple[str, ...]] = {
+    "datetime": ("datetime64", "date"),
+    "timestamp": ("datetime64",),
+    "float": ("float", "Float"),
+    "int": ("int", "Int"),
+    "string": ("str", "object"),
+    "bool": ("bool", "Bool"),
+}
+
+
+def _dtype_matches_family(dtype_str: str, family: str) -> bool:
+    """
+    True if a real dtype string (e.g. 'datetime64[s]', 'Float64')
+    belongs to the abstract family a taxonomy pattern declares (e.g.
+    'datetime', 'float'). Falls back to exact match for families with
+    no registered prefix mapping, so unanticipated dtype families
+    don't silently match nothing AND don't silently match everything --
+    they just behave as exact string comparison, the safest default.
+    """
+    prefixes = _DTYPE_FAMILY_PREFIXES.get(family)
+    if prefixes is None:
+        return dtype_str == family
+    return dtype_str.startswith(prefixes)
+
+
 def patterns_by_dtype(dtype: str) -> list[PatternDefinition]:
     """Used by clustering to narrow which patterns are even candidates
-    for a given column's dtype, before running signature checks."""
+    for a given column's dtype, before running signature checks.
+    `dtype` is expected to be a real dtype string as produced by
+    column_summary (e.g. 'datetime64[s]'), matched against each
+    pattern's declared dtype FAMILIES (e.g. 'datetime') via
+    _dtype_matches_family, not exact string equality."""
     return [
         p
         for p in load_all_patterns().values()
-        if any(dtype in hint.applies_to_dtypes for hint in p.detection_hints)
+        if any(
+            _dtype_matches_family(dtype, family)
+            for hint in p.detection_hints
+            for family in hint.applies_to_dtypes
+        )
     ]
 
 

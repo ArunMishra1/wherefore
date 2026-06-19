@@ -9,8 +9,26 @@ real -- built directly against datacompy 1.0.2's actual `PandasCompare`
 API (not speculated in advance), and verified to correctly diff
 `timezone_shift`-corrupted fixtures, detect dtype mismatches distinct
 from value mismatches, handle composite join keys, and detect
-source-only/target-only rows by key. 35 tests passing across taxonomy,
-base_dataset, the corruptor, and the comparison engine.
+source-only/target-only rows by key.
+
+The clustering layer (`clustering/signatures.py`,
+`clustering/cluster_mismatches.py`) is also real now -- groups
+DiffResult.mismatches by column, runs the `constant_offset_subset`
+signature against candidate patterns, returns statistical
+PatternMatch objects only (no causal language, enforced by a
+structural test). A real bug was caught and fixed while wiring this
+together: `taxonomy.registry.patterns_by_dtype` originally did exact
+string matching, so a YAML's `applies_to_dtypes: ["datetime"]` never
+matched real pandas dtype strings like `"datetime64[s]"` -- meaning
+the full pipeline silently produced "unrecognized" for every cluster
+despite the signature itself scoring correctly in isolation. Fixed via
+dtype-family matching; see `taxonomy/registry.py`'s
+`_dtype_matches_family` and the regression tests in both
+`test_registry.py` and `test_cluster_mismatches.py`.
+
+The full pipeline (generate -> corrupt -> diff -> cluster) now runs
+end-to-end for `timezone_shift` against real fixtures in both domains.
+53 tests passing.
 
 ## Why patterns are built one at a time, not all-YAML-first
 

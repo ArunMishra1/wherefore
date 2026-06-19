@@ -32,15 +32,20 @@ What's real today:
   composite join keys, dtype-mismatch detection distinct from
   value-mismatch detection — produces a normalized `DiffResult`,
   fully tested
+- Deterministic clustering: groups mismatches by column, runs
+  statistical signature checks against candidate taxonomy patterns,
+  outputs confidence-scored matches with **zero causal language** —
+  enforced by a structural test, not just convention
 - The taxonomy system: failure patterns are defined as data (YAML), not
   code, validated against a strict schema — see [Architecture](#architecture)
 - One fully implemented, end-to-end-tested failure pattern:
   `timezone_shift` (corruptor → detection signature → registry → real
-  diff output, all proven against real generated fixtures)
+  diff → real cluster match, all proven against real generated
+  fixtures in both domains)
 
-What's not built yet: fuzzy key matching, the deterministic clustering
-layer, the AI reasoning layer, the eval harness scoring loop, and the
-CLI. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live build queue.
+What's not built yet: fuzzy key matching, the AI reasoning layer, the
+eval harness scoring loop, and the CLI. See
+[`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live build queue.
 
 If you're looking at this expecting a working tool today, it isn't one
 yet — watch the repo or check back. If you're a fellow builder
@@ -164,15 +169,20 @@ the parts that are real:
 from wherefore.synthetic.base_dataset import generate_dataset, FINANCIAL_ACCOUNTS
 from wherefore.synthetic.corruptors.timezone_shift import apply
 from wherefore.comparison.diff_engine import compare
+from wherefore.clustering.cluster_mismatches import cluster_mismatches
 
 source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=20, seed=42)
 target, affected_rows = apply(source, column="opened_at", offset_hours=5.0, seed=1)
 
 result = compare(source, target, join_columns="account_id")
-print(f"Columns with mismatches: {result.columns_with_mismatches()}")
-print(f"Total mismatches: {len(result.mismatches)}")
-for m in result.mismatches[:3]:
-    print(f"  {m.key} — {m.column}: {m.source_value} -> {m.target_value}")
+clusters = cluster_mismatches(result)
+
+for c in clusters:
+    if c.is_unrecognized:
+        print(f"{c.column}: {len(c.mismatches)} mismatches, no known pattern matched")
+    else:
+        for match in c.candidate_patterns:
+            print(f"{c.column}: matches '{match.pattern_id}' (confidence {match.confidence:.2f})")
 ```
 
 ## Contributing
