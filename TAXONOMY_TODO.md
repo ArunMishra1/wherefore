@@ -3,12 +3,14 @@
 `timezone_shift` is fully implemented end-to-end: schema + YAML +
 corruptor (`synthetic/corruptors/timezone_shift.py`), proven against
 the registry AND against real generated fixtures in both domains
-(`FINANCIAL_ACCOUNTS`, `HEALTHCARE_PATIENTS`). 27 tests passing across
-taxonomy, base_dataset, and the corruptor. The detection_hints
-description in the YAML was verified to match actual corruptor output
-(constant_offset_subset: every affected row shifts by exactly the same
-delta, all other rows untouched) -- see
-tests/test_synthetic/test_corruptors/test_timezone_shift.py.
+(`FINANCIAL_ACCOUNTS`, `HEALTHCARE_PATIENTS`). The comparison engine
+(`comparison/diff_engine.py`, `comparison/diff_result.py`) is also now
+real -- built directly against datacompy 1.0.2's actual `PandasCompare`
+API (not speculated in advance), and verified to correctly diff
+`timezone_shift`-corrupted fixtures, detect dtype mismatches distinct
+from value mismatches, handle composite join keys, and detect
+source-only/target-only rows by key. 35 tests passing across taxonomy,
+base_dataset, the corruptor, and the comparison engine.
 
 ## Why patterns are built one at a time, not all-YAML-first
 

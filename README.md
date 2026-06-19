@@ -28,16 +28,19 @@ against labeled synthetic ground truth — see [Evals](#evals--why-trust-the-exp
 What's real today:
 - Synthetic data generator producing two realistic domains (financial
   accounts, healthcare claims), fully tested
+- Comparison engine wrapping `datacompy`: schema-aware diffing,
+  composite join keys, dtype-mismatch detection distinct from
+  value-mismatch detection — produces a normalized `DiffResult`,
+  fully tested
 - The taxonomy system: failure patterns are defined as data (YAML), not
   code, validated against a strict schema — see [Architecture](#architecture)
 - One fully implemented, end-to-end-tested failure pattern:
-  `timezone_shift` (corruptor → detection signature → registry, all proven
-  against real generated fixtures)
+  `timezone_shift` (corruptor → detection signature → registry → real
+  diff output, all proven against real generated fixtures)
 
-What's not built yet: the comparison engine, the deterministic
-clustering layer, the AI reasoning layer, the eval harness scoring loop,
-and the CLI. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live
-build queue.
+What's not built yet: fuzzy key matching, the deterministic clustering
+layer, the AI reasoning layer, the eval harness scoring loop, and the
+CLI. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live build queue.
 
 If you're looking at this expecting a working tool today, it isn't one
 yet — watch the repo or check back. If you're a fellow builder
@@ -160,13 +163,16 @@ the parts that are real:
 ```python
 from wherefore.synthetic.base_dataset import generate_dataset, FINANCIAL_ACCOUNTS
 from wherefore.synthetic.corruptors.timezone_shift import apply
+from wherefore.comparison.diff_engine import compare
 
 source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=20, seed=42)
 target, affected_rows = apply(source, column="opened_at", offset_hours=5.0, seed=1)
 
-print(f"Corrupted {len(affected_rows)} rows: {affected_rows}")
-print(source.loc[affected_rows[:3], ["account_id", "opened_at"]])
-print(target.loc[affected_rows[:3], ["account_id", "opened_at"]])
+result = compare(source, target, join_columns="account_id")
+print(f"Columns with mismatches: {result.columns_with_mismatches()}")
+print(f"Total mismatches: {len(result.mismatches)}")
+for m in result.mismatches[:3]:
+    print(f"  {m.key} — {m.column}: {m.source_value} -> {m.target_value}")
 ```
 
 ## Contributing
