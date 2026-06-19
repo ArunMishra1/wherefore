@@ -23,15 +23,18 @@ against labeled synthetic ground truth — see [Evals](#evals--why-trust-the-exp
 
 ## Status
 
-🚧 **Early, actively built in public. Not yet usable end-to-end.**
+🚧 **Actively built in public. The CLI works end-to-end through statistical pattern detection — the AI narrative layer is the next piece.**
 
 What's real today:
-- Synthetic data generator producing two realistic domains (financial
-  accounts, healthcare claims), fully tested
+- **A working CLI**: `wherefore compare a.csv b.csv` runs against real
+  files on disk and produces a report — see [Try it yourself](#try-it-yourself-with-your-own-files)
+  below
 - Comparison engine wrapping `datacompy`: schema-aware diffing,
   composite join keys, dtype-mismatch detection distinct from
-  value-mismatch detection — produces a normalized `DiffResult`,
-  fully tested
+  value-mismatch detection
+- Fuzzy key matching for when source/target keys don't align exactly
+  (e.g. a key column reformatted during migration), with deliberate
+  safeguards against false-confidence matches and ambiguous ties
 - Deterministic clustering: groups mismatches by column, runs
   statistical signature checks against candidate taxonomy patterns,
   outputs confidence-scored matches with **zero causal language** —
@@ -39,18 +42,17 @@ What's real today:
 - The taxonomy system: failure patterns are defined as data (YAML), not
   code, validated against a strict schema — see [Architecture](#architecture)
 - One fully implemented, end-to-end-tested failure pattern:
-  `timezone_shift` (corruptor → detection signature → registry → real
-  diff → real cluster match, all proven against real generated
-  fixtures in both domains)
+  `timezone_shift` — corruptor → detection signature → registry → real
+  diff → real cluster match → real CLI report, all proven against
+  real files in both synthetic domains
 
-What's not built yet: fuzzy key matching, the AI reasoning layer, the
-eval harness scoring loop, and the CLI. See
-[`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live build queue.
-
-If you're looking at this expecting a working tool today, it isn't one
-yet — watch the repo or check back. If you're a fellow builder
-interested in the design (especially the taxonomy-as-data architecture
-or the evals approach), the code and docs below are written for you.
+What's not built yet: the AI reasoning layer that turns a statistical
+match into a plain-English causal explanation, and the eval harness
+scoring loop. Until the reasoning layer exists, the CLI report shows
+*what* was statistically detected, not *why* it happened — the report
+says this explicitly so nobody mistakes a confidence score for an
+explanation. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live
+build queue.
 
 ## The problem, in plain terms
 
@@ -75,7 +77,10 @@ in this project, not an afterthought.
 source.csv, target.csv
         │
         ▼
- comparison engine        (wraps datacompy; schema-aware, fuzzy key matching)
+ loaders + key matching   (exact by default; --fuzzy-keys for reformatted keys)
+        │
+        ▼
+ comparison engine        (wraps datacompy; schema-aware diffing)
         │
         ▼
  normalized diff result
@@ -84,6 +89,9 @@ source.csv, target.csv
  deterministic clustering  (groups mismatches; runs cheap statistical
         │                   signature checks — NO causal claims here)
         ▼
+ ── wherefore compare stops here today, reporting statistical matches ──
+        │
+        ▼  (not built yet)
  AI reasoning layer        (Claude, behind a swappable explain() interface;
         │                   takes statistically-flagged clusters, writes
         │                   the causal narrative, cites real example rows,
@@ -132,7 +140,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **27 passed**). It's
+dependencies, and runs the test suite (should show **82 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
 
 After the first run, activate the environment in new shells with:
@@ -159,31 +167,70 @@ if `pip install` fails, a smaller transitive dependency without 3.14
 wheels yet is the likely cause — try a 3.11/3.12 interpreter if you hit
 this.
 
-### Trying what currently works
+### Try it yourself, with your own files
 
-The CLI isn't wired up yet (`wherefore compare ...` will raise
-`NotImplementedError` — see [Status](#status)). To actually exercise
-the parts that are real:
-
-```python
-from wherefore.synthetic.base_dataset import generate_dataset, FINANCIAL_ACCOUNTS
-from wherefore.synthetic.corruptors.timezone_shift import apply
-from wherefore.comparison.diff_engine import compare
-from wherefore.clustering.cluster_mismatches import cluster_mismatches
-
-source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=20, seed=42)
-target, affected_rows = apply(source, column="opened_at", offset_hours=5.0, seed=1)
-
-result = compare(source, target, join_columns="account_id")
-clusters = cluster_mismatches(result)
-
-for c in clusters:
-    if c.is_unrecognized:
-        print(f"{c.column}: {len(c.mismatches)} mismatches, no known pattern matched")
-    else:
-        for match in c.candidate_patterns:
-            print(f"{c.column}: matches '{match.pattern_id}' (confidence {match.confidence:.2f})")
+```bash
+wherefore compare old_export.csv new_export.csv --output report.md
 ```
+
+That's the whole interface. Two files in, a Markdown report out. No
+key column required — `wherefore` looks at your columns and picks the
+one that looks like an identifier (mostly-unique values, often named
+something with "id" or "key" in it). If it picks wrong, or your files
+don't share an obvious key, tell it directly:
+
+```bash
+wherefore compare old_export.csv new_export.csv --key employee_id
+```
+
+If the same record has a different-looking key on each side — a
+common symptom of a migration where IDs got reformatted, e.g.
+`EMP-1001` became `EMP1001` — add `--fuzzy-keys`:
+
+```bash
+wherefore compare old_export.csv new_export.csv --fuzzy-keys
+```
+
+Here's a concrete run. Two small HR exports, identical except every
+`hire_date` is five hours later in the new file — the kind of thing
+that happens when an export job's server timezone changes during a
+migration and nobody notices until payroll runs wrong:
+
+```bash
+$ wherefore compare old_export.csv new_export.csv --output report.md
+Compared 5 source rows against 5 target rows.
+Matched rows: 5
+  hire_date: 5 mismatches, matches 'timezone_shift' (confidence 1.00)
+
+Full report written to report.md
+```
+
+That confidence score is a real, deterministic measurement — every
+mismatched value differs from its source by exactly the same 5-hour
+delta, which is the statistical signature `wherefore` checks for. It
+is **not** an AI saying "this looks like a timezone bug" — that
+narrative layer doesn't exist yet (see [Status](#status)). What you get
+today is the honest middle step: real diffing, real grouping, real
+pattern matching against a known taxonomy, with the gap to "and here's
+why" stated plainly in the report itself.
+
+If nothing in the taxonomy matches what's actually wrong in your data,
+`wherefore` says so — `pattern unrecognized` — rather than forcing a
+guess. Right now the taxonomy has one pattern (`timezone_shift`); more
+are being added, tracked in [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
+
+<details>
+<summary>All flags</summary>
+
+```bash
+wherefore compare SOURCE TARGET [OPTIONS]
+
+  --key TEXT                   Join key column. Auto-detected if omitted.
+  --fuzzy-keys                 Allow approximate key matching (e.g. 'CUST-001' vs 'CUST001').
+  --output TEXT                Where to write the report (default: report.md).
+  --confidence-threshold FLOAT Minimum confidence to count as a pattern match (default: 0.9).
+```
+</details>
 
 ## Contributing
 

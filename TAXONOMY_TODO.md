@@ -26,9 +26,46 @@ dtype-family matching; see `taxonomy/registry.py`'s
 `_dtype_matches_family` and the regression tests in both
 `test_registry.py` and `test_cluster_mismatches.py`.
 
-The full pipeline (generate -> corrupt -> diff -> cluster) now runs
-end-to-end for `timezone_shift` against real fixtures in both domains.
-53 tests passing.
+The CLI is now real and runnable end-to-end:
+`wherefore compare source.csv target.csv --output report.md` works
+against actual files on disk, with `--key`, `--fuzzy-keys`, and
+`--confidence-threshold` flags. Two more real bugs were caught while
+building this and are documented with regression tests:
+
+1. Typer collapses a single registered `@app.command()` into the
+   app's root invocation rather than keeping it as an explicit
+   subcommand -- so `wherefore compare a.csv b.csv` failed with
+   "unexpected extra argument" until an empty `@app.callback()` was
+   added. See `cli.py`'s `_force_subcommand_mode` and
+   `test_cli.py::test_compare_is_an_explicit_subcommand_not_the_root_command`.
+2. CSV has no native datetime type, so a real `timezone_shift` fixture
+   written to disk and read back via `load_csv` arrived at clustering
+   with dtype `'str'`, not `'datetime64[...]'` -- meaning the full
+   pipeline reported "pattern unrecognized" through the real CLI even
+   though the identical in-memory data scored 1.0 confidence. Fixed
+   with conservative datetime auto-detection in `loaders.py`
+   (`_try_parse_datetime_columns`), with a deliberate guard against a
+   second false-positive risk discovered during the fix: bare numeric
+   strings like "2024" parse as valid ISO8601 dates by default, which
+   would have silently corrupted a genuine fiscal-year column.
+   `loaders.py`'s docstring and `test_loaders.py` cover both the fix
+   and the guard.
+
+`comparison/key_matching.py` (fuzzy key resolution) is also real,
+built directly against observed rapidfuzz scoring behavior: reformatted
+keys (dashes stripped) reliably score ~90-95, genuinely different keys
+can still score ~45 (not near zero, so a confidence FLOOR is required,
+not just "pick the highest score"), and genuinely ambiguous ties
+between two candidates are detected and left unmatched rather than
+guessed. A known limitation is documented directly in the module's
+docstring: once a source key is claimed by an earlier exact match, a
+later fuzzy key may end up matched against whatever's left in the
+pool even if it isn't a strong match in absolute terms.
+
+The full pipeline (load real files -> resolve keys -> diff -> cluster
+-> render report) now runs end-to-end via the actual CLI command,
+verified against real files on disk, not just in-memory DataFrames.
+82 tests passing.
 
 ## Why patterns are built one at a time, not all-YAML-first
 
