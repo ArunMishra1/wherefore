@@ -41,10 +41,15 @@ What's real today:
   enforced by a structural test, not just convention
 - The taxonomy system: failure patterns are defined as data (YAML), not
   code, validated against a strict schema — see [Architecture](#architecture)
-- One fully implemented, end-to-end-tested failure pattern:
-  `timezone_shift` — corruptor → detection signature → registry → real
-  diff → real cluster match → real CLI report, all proven against
-  real files in both synthetic domains
+- Three fully implemented, end-to-end-tested failure patterns:
+  `timezone_shift`, `truncation`, and `enum_drift` — corruptor →
+  detection signature → registry → real diff → real cluster match →
+  real CLI report, each proven against real files. Tested together
+  against the same dataset to confirm clustering distinguishes all
+  three correctly with zero cross-contamination, including a real
+  false-positive bug caught and fixed between `truncation` and
+  `enum_drift` (both target string columns) — see
+  [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md)
 
 What's not built yet: the AI reasoning layer that turns a statistical
 match into a plain-English causal explanation, and the eval harness
@@ -140,7 +145,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **82 passed**). It's
+dependencies, and runs the test suite (should show **116 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
 
 After the first run, activate the environment in new shells with:
@@ -216,8 +221,9 @@ why" stated plainly in the report itself.
 
 If nothing in the taxonomy matches what's actually wrong in your data,
 `wherefore` says so — `pattern unrecognized` — rather than forcing a
-guess. Right now the taxonomy has one pattern (`timezone_shift`); more
-are being added, tracked in [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
+guess. Right now the taxonomy has three patterns (`timezone_shift`,
+`truncation`, `enum_drift`); more are being added, tracked in
+[`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
 
 <details>
 <summary>All flags</summary>

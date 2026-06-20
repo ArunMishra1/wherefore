@@ -1,0 +1,44 @@
+id: truncation
+display_name: "String Truncation"
+category: structural
+
+description: >
+  A string column's values were cut off at a fixed character length
+  during migration -- typically because the target column's length
+  limit (e.g. a VARCHAR(255) defined as VARCHAR(50) on the new system,
+  or a legacy fixed-width field) is shorter than the source data
+  actually needs, and the write silently truncated instead of erroring.
+
+detection_hints:
+  - applies_to_dtypes: ["string"]
+    signature: "truncated_prefix"
+    description: >
+      Mismatched values where the target value is a literal prefix of
+      the source value (and strictly shorter) -- not necessarily cut
+      to the same length across all affected rows, since different
+      source strings of different lengths can each get cut to the
+      same byte/character limit at different resulting character counts.
+
+llm_context: >
+  Look at whether all truncated values land at or near the same
+  maximum length (e.g. consistently <=50 characters) -- that's a
+  strong signal of a fixed column-length limit on the target system.
+  If the cut lengths vary widely with no common ceiling, consider
+  whether this might instead be a display/UI truncation applied
+  inconsistently, or a different export step entirely.
+
+synthetic_corruption:
+  generator: "wherefore.synthetic.corruptors.truncation:apply"
+  params_schema:
+    max_length:
+      type: int
+      default: 20
+      description: "Character length values are cut to"
+    affected_fraction:
+      type: float
+      default: 0.3
+      description: "Fraction of rows in the target dataset to corrupt"
+
+severity_default: medium
+references:
+  - "https://en.wikipedia.org/wiki/Data_truncation"

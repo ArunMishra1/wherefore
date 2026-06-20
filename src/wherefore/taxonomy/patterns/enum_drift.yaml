@@ -1,0 +1,48 @@
+id: enum_drift
+display_name: "Enum/Lookup Value Drift"
+category: reference_data
+
+description: >
+  A categorical or status-code column was systematically recoded
+  during migration -- the same source value consistently became a
+  different target value (e.g. "approved" -> "APPROVED", or a numeric
+  status code remapped to a text label). This is distinct from random
+  data corruption: the defining trait is that the mapping is
+  consistent, not noisy -- every row with the same original value
+  ends up with the same new value.
+
+detection_hints:
+  - applies_to_dtypes: ["string"]
+    signature: "consistent_value_mapping"
+    description: >
+      For each distinct source value appearing in this cluster, its
+      mismatched rows consistently map to the same target value (not
+      necessarily the same target value across DIFFERENT source
+      values -- "approved" -> "APPROVED" and "denied" -> "REJECTED"
+      are two separate consistent mappings within one cluster).
+
+llm_context: >
+  Look at whether the mapping looks like a case change (lowercase to
+  uppercase), an abbreviation expansion (codes like "M"/"F" becoming
+  "Male"/"Female"), or a full relabeling with no obvious string
+  relationship (e.g. "1" becoming "Active") -- these point to
+  different migration causes: a case-normalization step, a lookup
+  table join, or a hardcoded recode script, respectively. If only SOME
+  source values in the column are affected while others pass through
+  unchanged, that's consistent with a partial migration or a recode
+  step that only covered specific known values.
+
+synthetic_corruption:
+  generator: "wherefore.synthetic.corruptors.enum_drift:apply"
+  params_schema:
+    value_mapping:
+      type: dict
+      description: "Mapping from old value to new value, e.g. {'approved': 'APPROVED'}"
+    affected_fraction:
+      type: float
+      default: 0.3
+      description: "Fraction of eligible rows (rows whose value is a key in value_mapping) to corrupt"
+
+severity_default: medium
+references:
+  - "https://en.wikipedia.org/wiki/Data_migration"

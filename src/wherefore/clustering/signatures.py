@@ -73,8 +73,103 @@ def constant_offset_subset(mismatches: list[MismatchRow]) -> float:
     return most_common_count / len(deltas)
 
 
+def truncated_prefix(mismatches: list[MismatchRow]) -> float:
+    """
+    Confidence that mismatched values in this cluster are explained by
+    truncation: the target value is a literal prefix of the source
+    value, and the target is shorter. Computed as the fraction of
+    mismatches satisfying this prefix relationship.
+
+    Deliberately does NOT require every mismatch to be cut to the
+    SAME length -- different rows can be truncated to different
+    lengths in practice (e.g. a fixed byte-length limit on a
+    multi-byte-encoded string truncates different strings to different
+    character counts). What's diagnostic is the prefix relationship
+    itself, not a shared cut length -- unlike constant_offset_subset,
+    where the constant delta IS the signature.
+
+    Returns 0.0 for an empty cluster or when no mismatches show this
+    relationship (e.g. a genuinely different value, not a cut-down one).
+    """
+    if not mismatches:
+        return 0.0
+
+    prefix_count = 0
+    total_comparable = 0
+    for m in mismatches:
+        source_str = m.source_value
+        target_str = m.target_value
+        if source_str is None or target_str is None:
+            continue
+        source_str, target_str = str(source_str), str(target_str)
+        total_comparable += 1
+        if len(target_str) < len(source_str) and source_str.startswith(target_str):
+            prefix_count += 1
+
+    if total_comparable == 0:
+        return 0.0
+
+    return prefix_count / total_comparable
+
+
+def consistent_value_mapping(mismatches: list[MismatchRow]) -> float:
+    """
+    Confidence that mismatches in this cluster are explained by a
+    systematic value recode: for each distinct source value seen in
+    the cluster, does it ALWAYS map to the same target value? This is
+    the signature of enum_drift.yaml's detection_hints -- a real
+    migration recode ('approved' -> 'APPROVED') is a consistent
+    function from source value to target value, not noise.
+
+    Computed per distinct source value, then averaged (weighted by
+    how many mismatches each source value contributes) -- so a cluster
+    where 'approved' consistently maps to 'APPROVED' but 'denied'
+    inconsistently maps to different things on different rows scores
+    partial confidence proportional to how much of the cluster is
+    explained by a clean mapping, not an all-or-nothing pass/fail
+    across the whole cluster.
+
+    REQUIRES REPETITION TO COUNT AS EVIDENCE: a source value that
+    appears only ONCE in the cluster contributes nothing to the
+    confidence score, regardless of what it mapped to. Confirmed by
+    direct testing that without this guard, a column of unique
+    free-text values (e.g. truncated names, where every person's name
+    is different) trivially scores 1.0 here too -- every "source value"
+    appears once, so it's vacuously "consistent" with itself, which is
+    a real false-positive risk once enum_drift and truncation compete
+    for the same string-dtype clusters. A genuine recode is only
+    visible as a pattern across REPEATED source values; a column where
+    nothing repeats can't demonstrate that pattern at all and should
+    score 0 contribution from those rows, not 1.
+
+    Returns 0.0 for an empty cluster, or when no source value repeats
+    (nothing to measure consistency across).
+    """
+    if not mismatches:
+        return 0.0
+
+    by_source_value: dict[object, list[object]] = {}
+    for m in mismatches:
+        by_source_value.setdefault(m.source_value, []).append(m.target_value)
+
+    total = len(mismatches)
+    consistent_count = 0
+    for source_value, target_values in by_source_value.items():
+        if len(target_values) < 2:
+            continue  # a single occurrence proves nothing about consistency
+        most_common_target_count = Counter(target_values).most_common(1)[0][1]
+        consistent_count += most_common_target_count
+
+    if consistent_count == 0:
+        return 0.0
+
+    return consistent_count / total
+
+
 SIGNATURE_REGISTRY: dict[str, Callable[[list[MismatchRow]], float]] = {
     "constant_offset_subset": constant_offset_subset,
+    "truncated_prefix": truncated_prefix,
+    "consistent_value_mapping": consistent_value_mapping,
 }
 
 

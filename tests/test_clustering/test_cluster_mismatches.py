@@ -19,7 +19,9 @@ from wherefore.clustering.cluster_mismatches import (
 )
 from wherefore.comparison.diff_engine import compare
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, HEALTHCARE_PATIENTS, generate_dataset
+from wherefore.synthetic.corruptors.enum_drift import apply as drift
 from wherefore.synthetic.corruptors.timezone_shift import apply
+from wherefore.synthetic.corruptors.truncation import apply as truncate
 
 
 @pytest.fixture
@@ -71,13 +73,26 @@ def test_no_mismatches_produces_no_clusters():
 
 def test_column_with_no_matching_pattern_is_honestly_unrecognized():
     """
-    account_type has no taxonomy pattern targeting string/enum columns
-    yet (enum_drift isn't built -- see TAXONOMY_TODO.md). Clustering
-    must report this as unrecognized, not force-fit an unrelated pattern.
+    Genuinely random, inconsistent corruption -- each row gets an
+    unrelated garbage value, with no consistent source->target mapping
+    and no prefix relationship -- must not match any known pattern,
+    including enum_drift and truncation (both of which target string
+    columns and are otherwise candidates here). Clustering must report
+    this as unrecognized, not force-fit either one.
+
+    NOTE: this test originally corrupted every selected row to the SAME
+    constant value ("unknown_type") -- but once enum_drift existed,
+    that's no longer a valid "nothing matches" case: many rows mapping
+    consistently from one source value to one target value IS exactly
+    the enum_drift signature, correctly matched. Updated to use
+    genuinely inconsistent corruption (different, unrelated garbage
+    values per row) so this test still proves what it claims to prove.
     """
     source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=20, seed=42)
     target = source.copy()
-    target.loc[0:5, "account_type"] = "unknown_type"
+    target.loc[0, "account_type"] = "xq7z"
+    target.loc[1, "account_type"] = "random_garbage_2"
+    target.loc[2, "account_type"] = "totally_different_value"
 
     result = compare(source, target, join_columns="account_id")
     clusters = cluster_mismatches(result)
@@ -127,3 +142,50 @@ def test_cluster_and_pattern_match_are_plain_dataclasses_no_narrative_field():
 
     assert not (cluster_fields & forbidden_words)
     assert not (match_fields & forbidden_words)
+
+
+def test_two_independent_corruptions_are_correctly_distinguished_by_column():
+    """
+    Proves clustering scales beyond a single pattern: two genuinely
+    different corruptions (a timezone shift on one column, a
+    truncation on another) applied to the same dataset must each be
+    correctly identified on their own column, with zero
+    cross-contamination -- the truncation cluster must not match
+    timezone_shift, and vice versa.
+    """
+    source = generate_dataset(HEALTHCARE_PATIENTS, n_rows=30, seed=42)
+    target, _ = truncate(source, column="patient_name", max_length=8, affected_fraction=0.3, seed=1)
+    target, _ = apply(target, column="encounter_date", offset_hours=9.0, affected_fraction=0.3, seed=2)
+
+    result = compare(source, target, join_columns="patient_id")
+    clusters = cluster_mismatches(result)
+    clusters_by_column = {c.column: c for c in clusters}
+
+    assert clusters_by_column["patient_name"].candidate_patterns[0].pattern_id == "truncation"
+    assert clusters_by_column["encounter_date"].candidate_patterns[0].pattern_id == "timezone_shift"
+
+
+def test_three_independent_corruptions_each_match_exactly_one_pattern():
+    """
+    The real test of cross-contamination risk: enum_drift and
+    truncation BOTH target string-dtype columns, so they're both
+    candidates for any string mismatch cluster. Before the
+    consistent_value_mapping false-positive fix, a pure truncation
+    cluster would have matched BOTH truncation AND enum_drift
+    simultaneously. With three independent corruptions across three
+    columns in one dataset, each column's cluster must match exactly
+    its own pattern -- not the other string-dtype pattern too.
+    """
+    source = generate_dataset(HEALTHCARE_PATIENTS, n_rows=30, seed=42)
+    target, _ = truncate(source, column="patient_name", max_length=8, affected_fraction=0.5, seed=1)
+    target, _ = apply(target, column="encounter_date", offset_hours=9.0, affected_fraction=0.3, seed=2)
+    mapping = {"approved": "APPROVED", "denied": "REJECTED"}
+    target, _ = drift(target, column="claim_status", value_mapping=mapping, affected_fraction=0.5, seed=3)
+
+    result = compare(source, target, join_columns="patient_id")
+    clusters = cluster_mismatches(result)
+    clusters_by_column = {c.column: c for c in clusters}
+
+    assert [p.pattern_id for p in clusters_by_column["patient_name"].candidate_patterns] == ["truncation"]
+    assert [p.pattern_id for p in clusters_by_column["encounter_date"].candidate_patterns] == ["timezone_shift"]
+    assert [p.pattern_id for p in clusters_by_column["claim_status"].candidate_patterns] == ["enum_drift"]

@@ -65,7 +65,66 @@ pool even if it isn't a strong match in absolute terms.
 The full pipeline (load real files -> resolve keys -> diff -> cluster
 -> render report) now runs end-to-end via the actual CLI command,
 verified against real files on disk, not just in-memory DataFrames.
-82 tests passing.
+
+`truncation` is also now fully implemented end-to-end (corruptor ->
+signature -> YAML -> registry -> real CLI report), proven against a
+real fixture and cross-checked against `timezone_shift` in the same
+dataset to confirm clustering correctly distinguishes two independent
+corruptions on different columns with zero cross-contamination -- see
+`test_cluster_mismatches.py::test_two_independent_corruptions_are_correctly_distinguished_by_column`.
+This is also the first proof that the project genuinely has more than
+one pattern working at once, which matters for evals later (precision/
+recall "per corruption type" requires more than one type to exist).
+
+`enum_drift` is also now fully implemented end-to-end. A real
+cross-contamination bug was caught and fixed while building it:
+`consistent_value_mapping` originally scored 1.0 confidence on ANY
+cluster where every distinct source value appeared exactly once --
+including a pure `truncation` fixture, where every name is naturally
+unique, so each "source value" was vacuously "consistent with itself."
+This meant `truncation` and `enum_drift` would BOTH match the same
+real truncation cluster the moment both patterns existed simultaneously
+(they're both candidates for any string-dtype mismatch). Fixed by
+requiring at least one source value to genuinely REPEAT in the cluster
+before counting toward confidence -- a real recode is only
+demonstrable as a pattern across repeated values; a column where
+nothing repeats can't prove anything about consistency. See
+`signatures.py`'s `consistent_value_mapping` docstring and the
+regression test
+`test_signatures.py::test_truncation_fixture_does_not_false_positive_on_consistent_value_mapping`.
+
+This also broke one existing test that had baked in an assumption that
+became false once `enum_drift` existed:
+`test_column_with_no_matching_pattern_is_honestly_unrecognized`
+originally corrupted every selected row to the SAME constant value,
+which is -- correctly -- now a textbook `enum_drift` match, not an
+unrecognized case. Updated to use genuinely random, non-repeating
+corruption instead, which is the actual "nothing matches" scenario
+this test is meant to prove. A reminder that as the taxonomy grows,
+"nothing matches" fixtures need periodic re-examination -- a fixture
+that's unrecognized today might become recognized tomorrow once a
+new, legitimately-matching pattern is added, and that's a sign the
+system is working, not a regression to suppress.
+
+There are now three independently-working patterns proven to coexist
+correctly in the same dataset with zero cross-contamination -- see
+`test_cluster_mismatches.py::test_three_independent_corruptions_each_match_exactly_one_pattern`.
+
+The full pipeline (load real files -> resolve keys -> diff -> cluster
+-> render report) now runs end-to-end via the actual CLI command for
+all three patterns, verified against real files on disk.
+
+116 tests passing.
+
+## Future, deliberately deferred (not now)
+
+**Multi-source-format support** (databases via SQLAlchemy, Parquet) --
+currently `loaders.py` handles CSV/JSON only. Deferred because the
+comparison engine already takes DataFrames, not file paths, so adding
+a new source format doesn't touch comparison/clustering/taxonomy at
+all -- it's a clean, separable addition any time, not something that
+needs to happen before other work. Worth doing once there's a real
+user asking for it.
 
 ## Why patterns are built one at a time, not all-YAML-first
 
@@ -85,16 +144,19 @@ against the registry (same loop just proven for timezone_shift).
 
 ## Remaining patterns (build in this order, easiest signature first)
 
-`truncation` is next:
+`truncation` and `enum_drift` are done. `null_type_coercion` is next:
 
-- [ ] `truncation` -- string/numeric values cut off at a fixed length.
-      Signature candidate: target values are consistently a prefix of
-      source values, often at a suspiciously round length (255, 256,
-      varchar limits).
-- [ ] `enum_drift` -- lookup/enum values changed (renamed, recoded,
+- [x] `truncation` -- string values cut off at a fixed length.
+      Signature: target value is a literal prefix of source, strictly
+      shorter -- confirmed NOT requiring a uniform cut length across
+      rows (different source lengths can cut to different resulting
+      lengths under one shared limit).
+- [x] `enum_drift` -- lookup/enum values changed (renamed, recoded,
       e.g. "M"/"F" -> "Male"/"Female", or a status code remapping).
-      Signature candidate: small, finite value-set on both sides, with
-      a consistent one-to-one (or many-to-one) mapping between them.
+      Signature: a distinct source value consistently maps to the
+      same target value, REQUIRING repetition (a value seen once
+      proves nothing) -- this requirement was added after catching a
+      real false-positive against `truncation` (see above).
 - [ ] `null_type_coercion` -- nulls/blanks coerced into wrong types
       (empty string vs NaN vs 0 vs "None" the string). Signature
       candidate: target value is a known "null-like" sentinel where
@@ -120,9 +182,13 @@ against the registry (same loop just proven for timezone_shift).
 
 ## Order rationale
 
-`truncation` and `enum_drift` next: both have simple, almost purely
-syntactic signatures (prefix-matching, finite value-set mapping) and
-will validate the corruptor <-> YAML <-> registry loop again cheaply
-before we hit `dedup_failure`, which is the one genuinely compound
+`null_type_coercion` next: like `truncation` and `enum_drift`, it has
+a straightforward signature (target value is a known null-like
+sentinel where source had real data, or vice versa) and exercises a
+NEW dtype family (nulls/type coercion spans numeric AND string
+columns) before `dedup_failure`, which is the one genuinely compound
 case and the real test of the `confirmation_function` escape hatch
-described in schema.py.
+described in schema.py. Worth specifically checking for
+cross-contamination against the three existing string/numeric
+patterns once built, given the real false-positive already caught
+between `truncation` and `enum_drift`.
