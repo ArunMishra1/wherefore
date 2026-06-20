@@ -25,3 +25,9 @@ evals/results/*
 
 # OS noise
 .DS_Store
+
+# Default CLI output from manually trying `wherefore compare` --
+# this is a generated report, not source. Doesn't affect
+# evals/fixtures/*.csv (committed on purpose) since this only matches
+# the literal root-level report.md the CLI writes by default.
+/report.md
