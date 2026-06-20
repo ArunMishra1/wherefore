@@ -504,3 +504,83 @@ def test_compare_dir_aggregates_redaction_categories_across_pairs(tmp_path, monk
         app, ["compare-dir", str(source_dir), str(target_dir), "--explain", "--output-dir", str(output_dir)]
     )
     assert "Redacted before sending to Claude (across all pairs): email" in result.output
+
+
+@pytest.fixture
+def mock_s3_with_csv_pair(monkeypatch):
+    """
+    Real mocked S3 bucket with a real timezone_shift fixture uploaded,
+    for testing the CLI's s3:// handling end-to-end.
+    """
+    moto = pytest.importorskip("moto", reason="moto is required for S3 CLI tests")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+
+    with moto.mock_aws():
+        import io
+
+        import boto3
+
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket="test-bucket")
+
+        source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=42)
+        target, _ = apply(source, column="opened_at", offset_hours=5.0, affected_fraction=0.3, seed=1)
+        buf1, buf2 = io.StringIO(), io.StringIO()
+        source.to_csv(buf1, index=False)
+        target.to_csv(buf2, index=False)
+        client.put_object(Bucket="test-bucket", Key="old/accounts.csv", Body=buf1.getvalue())
+        client.put_object(Bucket="test-bucket", Key="new/accounts.csv", Body=buf2.getvalue())
+
+        yield
+
+
+def test_compare_works_end_to_end_against_real_s3_paths(mock_s3_with_csv_pair, tmp_path):
+    """
+    The real end-to-end test for S3 support through the actual CLI
+    command -- not just the loader functions in isolation. This is
+    also the regression test for a real bug caught while building this:
+    cli.py's compare() only caught (FileNotFoundError, ValueError,
+    UnicodeDecodeError) around load_file(), so loaders.py's new
+    RuntimeError (S3 fetch failures) and ImportError (missing boto3)
+    crashed with a raw traceback instead of the CLI's normal clean red
+    error message. Fixed by adding both to the caught exception tuple.
+    """
+    output_path = tmp_path / "report.md"
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "s3://test-bucket/old/accounts.csv",
+            "s3://test-bucket/new/accounts.csv",
+            "--output",
+            str(output_path),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "timezone_shift" in result.output
+    assert output_path.exists()
+
+
+def test_compare_with_s3_error_shows_clean_message_not_raw_traceback(monkeypatch):
+    """
+    Confirms an S3-related failure (e.g. nonexistent bucket) produces
+    the CLI's normal clean error output, not an unhandled exception.
+    """
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    moto = pytest.importorskip("moto", reason="moto is required for this test")
+
+    with moto.mock_aws():
+        result = runner.invoke(
+            app,
+            [
+                "compare",
+                "s3://nonexistent-bucket-xyz/a.csv",
+                "s3://nonexistent-bucket-xyz/b.csv",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Error loading files" in result.output

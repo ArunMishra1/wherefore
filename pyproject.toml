@@ -42,6 +42,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "pytest-cov",
+    "moto[s3]>=5.2",     # mocks real AWS S3 calls for testing loaders.py's S3 support, no real AWS account needed
+]
+s3 = [
+    "boto3>=1.34",       # optional: only needed for s3:// paths in loaders.py. Install with: pip install wherefore[s3]
 ]
 
 [project.scripts]

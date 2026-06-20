@@ -5,10 +5,21 @@ loaders.py's module docstring for why encoding failures and null-string
 preservation are deliberate, not bugs to fix.
 """
 
+import os
+
 import pandas as pd
 import pytest
 
-from wherefore.comparison.loaders import load_csv, load_excel, load_file, load_json, load_parquet
+from wherefore.comparison.loaders import (
+    _is_s3_path,
+    _parse_s3_path,
+    _suffix_from_path_string,
+    load_csv,
+    load_excel,
+    load_file,
+    load_json,
+    load_parquet,
+)
 
 
 @pytest.fixture
@@ -287,3 +298,195 @@ def test_load_file_error_message_mentions_all_supported_formats(tmp_path):
     p.write_text("not a real format")
     with pytest.raises(ValueError, match=r"\.csv.*\.json.*\.parquet.*\.xlsx"):
         load_file(p)
+
+
+# --- S3 support tests ---
+# Use moto to mock real AWS S3 calls -- no real AWS account or network
+# access needed. moto is a dev dependency specifically for this.
+
+moto = pytest.importorskip("moto", reason="moto is required to test S3 support")
+from moto import mock_aws  # noqa: E402
+
+
+@pytest.fixture
+def mock_s3_bucket(monkeypatch):
+    """
+    Sets fake AWS credentials (moto doesn't need real ones, but boto3
+    raises NoCredentialsError if NONE are present at all) and yields a
+    real boto3 S3 client pointed at a mocked AWS backend with one
+    bucket created, ready for tests to upload fixtures into.
+    """
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+
+    with mock_aws():
+        import boto3
+
+        client = boto3.client("s3", region_name="us-east-1")
+        client.create_bucket(Bucket="test-bucket")
+        yield client
+
+
+def test_is_s3_path_detects_s3_urls():
+    assert _is_s3_path("s3://bucket/file.csv") is True
+    assert _is_s3_path("/local/path/file.csv") is False
+    assert _is_s3_path("file.csv") is False
+
+
+def test_parse_s3_path_splits_bucket_and_key():
+    bucket, key = _parse_s3_path("s3://my-bucket/exports/accounts.csv")
+    assert bucket == "my-bucket"
+    assert key == "exports/accounts.csv"
+
+
+def test_parse_s3_path_rejects_malformed_path():
+    with pytest.raises(ValueError, match="Malformed S3 path"):
+        _parse_s3_path("s3://bucket-with-no-key")
+
+
+def test_suffix_from_path_string_handles_s3_urls():
+    assert _suffix_from_path_string("s3://bucket/exports/accounts.csv") == ".csv"
+    assert _suffix_from_path_string("s3://bucket/exports/accounts.PARQUET") == ".parquet"
+    assert _suffix_from_path_string("s3://bucket/exports/no_extension") == ""
+
+
+def test_pathlib_does_not_mangle_when_routed_through_resolve_source(mock_s3_bucket):
+    """
+    THE regression test for the real bug this whole module was
+    designed around: confirmed directly that Path("s3://bucket/file.csv")
+    mangles the URL (collapses the double slash). This test proves the
+    actual fetch still works correctly end-to-end despite that risk,
+    by uploading a real, identifiable CSV and confirming the BUCKET
+    AND KEY used for the fetch were correct (if Path() mangling had
+    leaked through, this fetch would fail or silently fetch from the
+    wrong location).
+    """
+    mock_s3_bucket.put_object(Bucket="test-bucket", Key="exports/accounts.csv", Body="id,val\n1,42\n")
+    df = load_csv("s3://test-bucket/exports/accounts.csv")
+    assert df.loc[0, "val"] == 42
+
+
+def test_load_csv_from_s3_preserves_null_handling(mock_s3_bucket):
+    """
+    Confirms the S3 path goes through the EXACT SAME null-preservation
+    logic as local CSV loading -- not a simplified version -- since
+    _resolve_source returns a buffer that flows through the same
+    pd.read_csv call with the same keep_default_na=False kwargs.
+    """
+    mock_s3_bucket.put_object(
+        Bucket="test-bucket", Key="data.csv", Body="id,note\n1,\n2,NULL\n"
+    )
+    df = load_csv("s3://test-bucket/data.csv")
+    assert pd.isna(df.loc[0, "note"])
+    assert df.loc[1, "note"] == "NULL"
+
+
+def test_load_csv_from_s3_still_detects_datetime_columns(mock_s3_bucket):
+    mock_s3_bucket.put_object(
+        Bucket="test-bucket", Key="data.csv", Body="id,ts\n1,2024-01-01 10:00:00\n2,2024-01-02 11:00:00\n"
+    )
+    df = load_csv("s3://test-bucket/data.csv")
+    assert pd.api.types.is_datetime64_any_dtype(df["ts"])
+
+
+def test_load_parquet_from_s3(mock_s3_bucket):
+    import io
+
+    original = pd.DataFrame({"id": [1, 2], "val": [10.5, 20.5]})
+    buf = io.BytesIO()
+    original.to_parquet(buf, index=False)
+    mock_s3_bucket.put_object(Bucket="test-bucket", Key="data.parquet", Body=buf.getvalue())
+
+    df = load_parquet("s3://test-bucket/data.parquet")
+    assert df.loc[0, "val"] == 10.5
+
+
+def test_load_excel_from_s3(mock_s3_bucket):
+    import io
+
+    original = pd.DataFrame({"id": [1, 2], "val": ["a", "b"]})
+    buf = io.BytesIO()
+    original.to_excel(buf, index=False)
+    mock_s3_bucket.put_object(Bucket="test-bucket", Key="data.xlsx", Body=buf.getvalue())
+
+    df = load_excel("s3://test-bucket/data.xlsx")
+    assert df.loc[1, "val"] == "b"
+
+
+def test_load_json_from_s3(mock_s3_bucket):
+    mock_s3_bucket.put_object(Bucket="test-bucket", Key="data.json", Body='[{"id": 1, "val": "a"}]')
+    df = load_json("s3://test-bucket/data.json")
+    assert df.loc[0, "val"] == "a"
+
+
+def test_load_file_dispatches_s3_csv_correctly(mock_s3_bucket):
+    """
+    The real end-to-end dispatch test: load_file must correctly route
+    an s3:// CSV path to load_csv with the unmangled URL, not a
+    Path-corrupted version.
+    """
+    mock_s3_bucket.put_object(Bucket="test-bucket", Key="exports/accounts.csv", Body="id,val\n1,99\n")
+    df = load_file("s3://test-bucket/exports/accounts.csv")
+    assert df.loc[0, "val"] == 99
+
+
+def test_load_file_dispatches_s3_parquet_correctly(mock_s3_bucket):
+    import io
+
+    original = pd.DataFrame({"id": [1], "val": [99.0]})
+    buf = io.BytesIO()
+    original.to_parquet(buf, index=False)
+    mock_s3_bucket.put_object(Bucket="test-bucket", Key="data.parquet", Body=buf.getvalue())
+
+    df = load_file("s3://test-bucket/data.parquet")
+    assert df.loc[0, "val"] == 99.0
+
+
+def test_s3_nonexistent_key_raises_clear_runtime_error(mock_s3_bucket):
+    with pytest.raises(RuntimeError, match="Failed to read"):
+        load_csv("s3://test-bucket/does-not-exist.csv")
+
+
+def test_s3_nonexistent_bucket_raises_clear_runtime_error(mock_s3_bucket):
+    with pytest.raises(RuntimeError, match="Failed to read"):
+        load_csv("s3://this-bucket-does-not-exist-at-all/file.csv")
+
+
+def test_s3_missing_credentials_raises_clear_runtime_error(monkeypatch):
+    """
+    Without mock_s3_bucket's fake credentials, a real S3 call should
+    fail with our clear, actionable RuntimeError -- not a raw
+    botocore NoCredentialsError leaking through.
+    """
+    monkeypatch.delenv("AWS_ACCESS_KEY_ID", raising=False)
+    monkeypatch.delenv("AWS_SECRET_ACCESS_KEY", raising=False)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    # Also ensure no real credentials file gets picked up in this test env
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent/path")
+    monkeypatch.setenv("AWS_CONFIG_FILE", "/nonexistent/path")
+
+    with pytest.raises(RuntimeError, match="No AWS credentials found"):
+        load_csv("s3://some-bucket/file.csv")
+
+
+def test_missing_boto3_raises_clear_import_error(monkeypatch):
+    """
+    Confirms the optional-dependency error message is clear and
+    actionable, not a raw 'No module named boto3' from deep in the
+    call stack. Simulates boto3 being absent via import interception,
+    since boto3 IS actually installed in the dev/test environment.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "boto3":
+            raise ImportError("No module named 'boto3'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ImportError, match=r"pip install wherefore\[s3\]"):
+        load_csv("s3://some-bucket/file.csv")

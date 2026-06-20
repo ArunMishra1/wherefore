@@ -59,7 +59,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs everything, and runs the test suite
-(should show **230 passed**, no API key needed — the test suite uses a
+(should show **248 passed**, no API key needed — the test suite uses a
 fake AI provider, zero network calls). Safe to re-run.
 
 Then, on any two files of yours:
@@ -131,16 +131,17 @@ statistical detection, AI explanation, and a scored eval harness.
 
 | | |
 |---|---|
-| **Formats** | CSV, JSON, Parquet, Excel — auto-detected, mix-and-match |
+| **Formats** | CSV, JSON, Parquet, Excel — local or `s3://`, auto-detected, mix-and-match |
 | **Modes** | One file pair (`compare`) or a whole directory (`compare-dir`) |
 | **Taxonomy** | 5 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision` |
 | **AI layer** | Verified against the real Claude API twice — manually and via the scored eval harness — 100% match on a small (six-fixture) sample |
 | **Privacy** | Redacts emails/SSNs/cards/phones before any `--explain` call, on by default |
-| **Tests** | 230 passing, including end-to-end runs against real generated files |
+| **Tests** | 248 passing, including a real (mocked) S3 round-trip and end-to-end runs against real generated files |
 
 **Not built yet:** more fixture coverage at scale, a sixth pattern
-(`encoding_mismatch`), and database/cloud-storage connectivity (file-based
-only today). Live queue: [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
+(`encoding_mismatch`), and database connectivity (Postgres, MySQL,
+SQLite). File-based sources — local and `s3://` — and CSV/JSON/Parquet/
+Excel are all supported today. Live queue: [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
 
 <details>
 <summary>The harder bugs this surfaced, if you're curious</summary>
@@ -262,6 +263,16 @@ looks like an identifier (mostly-unique values, often named with "id"
 or "key"). If the same record has a differently-formatted key on each
 side (e.g. `EMP-1001` vs `EMP1001`, common after a migration), add
 `--fuzzy-keys`.
+
+Files can live in S3, not just on disk — mix and match freely:
+
+```bash
+pip install "wherefore[s3]"   # boto3 is optional, only needed for s3:// paths
+wherefore compare s3://old-bucket/accounts.csv s3://new-bucket/accounts.csv
+```
+
+Uses the standard AWS credential chain (env vars, `~/.aws/credentials`,
+IAM role, `AWS_PROFILE`) — `wherefore` doesn't invent its own.
 
 ### A whole migration, not one table
 

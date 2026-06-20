@@ -1,10 +1,11 @@
 """
 comparison/loaders.py
 
-Loads CSV/JSON into normalized pandas DataFrames for the comparison
-engine. The central design rule here, confirmed against real pandas
-behavior rather than assumed: DO NOT let pandas' helpful defaults
-silently erase the exact signals the taxonomy exists to detect.
+Loads CSV/JSON/Parquet/Excel into normalized pandas DataFrames for the
+comparison engine, from either a local path or an s3:// URL. The
+central design rule here, confirmed against real pandas behavior
+rather than assumed: DO NOT let pandas' helpful defaults silently
+erase the exact signals the taxonomy exists to detect.
 
 Two concrete cases this resolves, both verified against real pandas
 output before writing this module:
@@ -29,13 +30,114 @@ output before writing this module:
    pandas' default null-string collapsing (`keep_default_na=False`)
    and treat ONLY a truly empty cell as null. Literal "NULL", "NaN",
    "N/A" strings are preserved as actual string values.
+
+S3 SUPPORT. `boto3` is an OPTIONAL dependency (`pip install
+wherefore[s3]`), not a hard requirement -- most users never touch S3,
+and the "lightweight" principle for this project means nobody pays for
+boto3's install weight unless they actually use it. A real, confirmed
+bug avoided here: Python's `pathlib.Path` silently MANGLES an s3://
+URL (Path("s3://bucket/file.csv") collapses the double slash to
+"s3:/bucket/file.csv", a corrupted path that still happens to keep a
+correct-looking .suffix, masking the corruption). Every entry point in
+this module checks for an s3:// prefix BEFORE ever constructing a
+Path, routing S3 paths through `_fetch_s3_to_buffer` instead, which
+downloads into an in-memory buffer that pandas' readers accept
+natively (confirmed directly: pd.read_csv/read_parquet/read_excel all
+accept BytesIO/StringIO, not just real paths).
 """
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pandas as pd
+
+
+def _is_s3_path(path: str) -> bool:
+    return isinstance(path, str) and path.startswith("s3://")
+
+
+def _parse_s3_path(path: str) -> tuple[str, str]:
+    """Splits 's3://bucket/key/with/slashes.csv' into (bucket, key)."""
+    without_prefix = path[len("s3://"):]
+    bucket, _, key = without_prefix.partition("/")
+    if not bucket or not key:
+        raise ValueError(f"Malformed S3 path: {path!r}. Expected s3://bucket/key.")
+    return bucket, key
+
+
+def _fetch_s3_to_buffer(path: str) -> io.BytesIO:
+    """
+    Downloads an S3 object into an in-memory BytesIO buffer. Requires
+    boto3 (optional dependency: `pip install wherefore[s3]`) -- raises
+    a clear, actionable ImportError if it's missing, rather than
+    letting a raw "No module named 'boto3'" surface from deep inside
+    pandas' call stack.
+
+    Uses the standard AWS credential chain (env vars, ~/.aws/credentials,
+    IAM role, AWS_PROFILE) via boto3's default behavior -- wherefore
+    does not invent its own credential mechanism. NoCredentialsError
+    and ClientError (e.g. bucket/key not found, access denied) are
+    caught and re-raised with a clearer message; both are real,
+    confirmed exception types from botocore, not guessed.
+    """
+    try:
+        import boto3
+        import botocore.exceptions
+    except ImportError as e:
+        raise ImportError(
+            "Reading from S3 requires boto3, which is an optional dependency. "
+            "Install it with: pip install wherefore[s3]"
+        ) from e
+
+    bucket, key = _parse_s3_path(path)
+    client = boto3.client("s3")
+
+    try:
+        response = client.get_object(Bucket=bucket, Key=key)
+    except botocore.exceptions.NoCredentialsError as e:
+        raise RuntimeError(
+            "No AWS credentials found. wherefore uses the standard AWS credential "
+            "chain (env vars AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, "
+            "~/.aws/credentials, IAM role, or AWS_PROFILE) -- set one of these "
+            "before reading from S3."
+        ) from e
+    except botocore.exceptions.ClientError as e:
+        error_code = e.response.get("Error", {}).get("Code", "Unknown")
+        raise RuntimeError(
+            f"Failed to read {path!r} from S3 (AWS error: {error_code}). "
+            "Check the bucket/key are correct and your credentials have read access."
+        ) from e
+
+    return io.BytesIO(response["Body"].read())
+
+
+def _resolve_source(path: str | Path) -> Path | io.BytesIO:
+    """
+    The single dispatch point every load_* function calls instead of
+    constructing a Path directly. Returns the original path unchanged
+    for local files (so existing Path-based behavior -- .exists()
+    checks, suffix detection -- is completely undisturbed), or a
+    downloaded in-memory buffer for s3:// paths.
+    """
+    if _is_s3_path(str(path)):
+        return _fetch_s3_to_buffer(str(path))
+    return Path(path)
+
+
+def _suffix_from_path_string(path_str: str) -> str:
+    """
+    Extracts a file extension from a raw path string (including s3://
+    URLs), e.g. '.csv' from 's3://bucket/exports/accounts.csv'.
+    Returns '' if the filename has no dot. Operates on plain string
+    splitting, never pathlib.Path, since Path() is confirmed to mangle
+    s3:// URLs before this function would ever see them.
+    """
+    filename = path_str.rsplit("/", 1)[-1]
+    if "." not in filename:
+        return ""
+    return "." + filename.rsplit(".", 1)[-1].lower()
 
 
 def load_csv(path: str | Path, encoding: str = "utf-8") -> pd.DataFrame:
@@ -53,13 +155,17 @@ def load_csv(path: str | Path, encoding: str = "utf-8") -> pd.DataFrame:
     real datetime in memory becomes dtype 'str' after a CSV
     round-trip, and clustering's patterns_by_dtype then finds no
     candidates at all for it).
+
+    Also accepts an s3:// path (see module docstring) -- the existence
+    check below only applies to local paths; an S3 fetch that failed
+    has already raised a clear error inside _resolve_source.
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"No such file: {path}")
+    source = _resolve_source(path)
+    if isinstance(source, Path) and not source.exists():
+        raise FileNotFoundError(f"No such file: {source}")
 
     df = pd.read_csv(
-        path,
+        source,
         encoding=encoding,
         keep_default_na=False,
         na_values=[""],
@@ -171,12 +277,13 @@ def load_parquet(path: str | Path) -> pd.DataFrame:
     Parquet's strong typing makes this specific failure mode
     genuinely less likely to occur in real Parquet-based pipelines in
     the first place, not a bug in this loader.
+    Also accepts an s3:// path (see module docstring).
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"No such file: {path}")
+    source = _resolve_source(path)
+    if isinstance(source, Path) and not source.exists():
+        raise FileNotFoundError(f"No such file: {source}")
 
-    return pd.read_parquet(path)
+    return pd.read_parquet(source)
 
 
 def load_excel(path: str | Path, sheet_name: str | int = 0) -> pd.DataFrame:
@@ -192,13 +299,14 @@ def load_excel(path: str | Path, sheet_name: str | int = 0) -> pd.DataFrame:
     pandas' own default -- exposed as a parameter since a real
     workbook may have multiple sheets and the caller may need a
     specific one, not silently always the first.
+    Also accepts an s3:// path (see module docstring).
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"No such file: {path}")
+    source = _resolve_source(path)
+    if isinstance(source, Path) and not source.exists():
+        raise FileNotFoundError(f"No such file: {source}")
 
     return pd.read_excel(
-        path,
+        source,
         sheet_name=sheet_name,
         keep_default_na=False,
         na_values=[""],
@@ -214,12 +322,13 @@ def load_json(path: str | Path) -> pd.DataFrame:
     the string `"null"` natively. pandas' json normalization respects
     that distinction already, so no special null handling is needed
     here the way it is for CSV.
+    Also accepts an s3:// path (see module docstring).
     """
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"No such file: {path}")
+    source = _resolve_source(path)
+    if isinstance(source, Path) and not source.exists():
+        raise FileNotFoundError(f"No such file: {source}")
 
-    return pd.read_json(path)
+    return pd.read_json(source)
 
 
 def load_file(path: str | Path, encoding: str = "utf-8") -> pd.DataFrame:
@@ -228,18 +337,32 @@ def load_file(path: str | Path, encoding: str = "utf-8") -> pd.DataFrame:
     ValueError for unrecognized extensions rather than guessing a
     format -- guessing wrong silently would produce a confusingly
     malformed DataFrame rather than a clear error.
+
+    Accepts an s3:// path alongside local paths. Confirmed by direct
+    testing that Path("s3://bucket/file.csv") silently MANGLES the URL
+    (collapses the double slash), so the suffix here is extracted from
+    the raw path string directly for S3 paths -- never from a
+    constructed Path -- and the original, unmangled string is passed
+    through to the individual load_* functions, which resolve it via
+    _resolve_source themselves.
     """
-    path = Path(path)
-    suffix = path.suffix.lower()
+    path_str = str(path)
+    if _is_s3_path(path_str):
+        suffix = _suffix_from_path_string(path_str)
+        file_for_loaders = path_str
+    else:
+        path_obj = Path(path)
+        suffix = path_obj.suffix.lower()
+        file_for_loaders = path_obj
 
     if suffix == ".csv":
-        return load_csv(path, encoding=encoding)
+        return load_csv(file_for_loaders, encoding=encoding)
     elif suffix == ".json":
-        return load_json(path)
+        return load_json(file_for_loaders)
     elif suffix == ".parquet":
-        return load_parquet(path)
+        return load_parquet(file_for_loaders)
     elif suffix in (".xlsx", ".xls"):
-        return load_excel(path)
+        return load_excel(file_for_loaders)
     else:
         raise ValueError(
             f"Unrecognized file extension {suffix!r} for {path}. "

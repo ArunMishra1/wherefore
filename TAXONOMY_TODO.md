@@ -615,3 +615,58 @@ patterns (timezone_shift, truncation) plus a genuinely clean pair and
 a deliberately-unmatched file, confirming the pairing, skip, and
 report-writing behavior all work correctly together -- not just each
 piece in isolation. 230 tests passing.
+
+## S3 support
+
+`loaders.py` now accepts `s3://bucket/key.ext` alongside local paths,
+for all four formats (CSV, JSON, Parquet, Excel). `boto3` is an
+OPTIONAL dependency (`pip install wherefore[s3]`), confirmed by direct
+testing that a plain `pip install wherefore` (no extras) does NOT pull
+boto3 in at all -- keeping the lightweight-by-default principle intact
+for the majority of users who never touch S3.
+
+A real, confirmed bug was designed around from the start, not
+discovered after the fact: `pathlib.Path("s3://bucket/file.csv")`
+silently MANGLES the URL (collapses the double slash to
+"s3:/bucket/file.csv"), while `.suffix` detection still happens to
+work on the mangled path -- meaning the corruption would be invisible
+until the actual fetch failed or silently hit the wrong location. Every
+entry point in loaders.py checks for an `s3://` prefix BEFORE ever
+constructing a Path, via `_resolve_source` (returns a Path for local
+files, an in-memory buffer for S3) and `_suffix_from_path_string`
+(extracts the extension via plain string splitting for S3 URLs,
+never via Path). `load_file`'s dispatch logic was rewritten around
+this rather than patched, since the original implementation
+constructed a Path unconditionally before any S3 check could happen.
+
+Credentials use the standard AWS chain (env vars, `~/.aws/credentials`,
+IAM role, `AWS_PROFILE`) via boto3's own default behavior -- wherefore
+does not invent a custom credential mechanism. `NoCredentialsError`
+and `ClientError` (both real, confirmed botocore exception types, not
+guessed) are caught and re-raised with clearer, actionable messages.
+
+A real bug was caught while testing the actual CLI command (not just
+the loader functions in isolation): `cli.py`'s `compare()` and
+`compare_dir()` only caught `(FileNotFoundError, ValueError,
+UnicodeDecodeError)` around `load_file()` calls -- so the new
+`RuntimeError` (S3 fetch failures) and `ImportError` (missing boto3)
+crashed with a raw, unhandled traceback instead of the CLI's normal
+clean red error message. Found by actually invoking the real CLI
+command against a mocked S3 bucket, not by inspecting the loader code
+alone -- a good example of why testing through the full stack (loader
+-> CLI) catches what testing one layer in isolation can't. Fixed by
+adding both exception types to the caught tuple in both commands.
+
+All S3 behavior is tested against a REAL (mocked) AWS backend via
+`moto` (a dev-only dependency, not needed for production use) --
+real bucket creation, real object uploads, real fetches through
+wherefore's actual loader and CLI code paths, not hand-rolled fakes.
+Covers: CSV/JSON/Parquet/Excel round-trips through S3 (confirming the
+buffer-based path preserves the exact same null-handling and datetime-
+detection behavior as local files, not a simplified version),
+malformed S3 paths, missing credentials, missing boto3, nonexistent
+bucket/key, and the full CLI command end-to-end against a mocked
+migration scenario (two buckets, two CSV exports, one timezone_shift
+fixture).
+
+248 tests passing.

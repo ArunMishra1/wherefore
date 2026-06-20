@@ -186,7 +186,7 @@ def compare(
     try:
         source_df = load_file(source)
         target_df = load_file(target)
-    except (FileNotFoundError, ValueError, UnicodeDecodeError) as e:
+    except (FileNotFoundError, ValueError, UnicodeDecodeError, RuntimeError, ImportError) as e:
         typer.secho(f"Error loading files: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
@@ -297,7 +297,7 @@ def compare_dir(
         try:
             source_df = load_file(str(source_file))
             target_df = load_file(str(target_file))
-        except (FileNotFoundError, ValueError, UnicodeDecodeError) as e:
+        except (FileNotFoundError, ValueError, UnicodeDecodeError, RuntimeError, ImportError) as e:
             typer.secho(f"  [SKIPPED] {pair_label}: error loading files: {e}", fg=typer.colors.RED)
             failed += 1
             continue
