@@ -411,3 +411,35 @@ than approximating its statistical footprint -- the approximation can
 fail in exactly the cases a threshold is supposed to guard against.
 
 189 tests passing.
+
+## First real --llm eval run (against the actual Anthropic API)
+
+Run by the user, against their own API key, across all 6 committed
+fixtures: `python3 -m evals.harness.run_eval --llm`.
+
+Result: 100% accuracy. Every `matched_pattern_id` explain() committed
+to matched ground truth -- precision=1.00, recall=1.00 for all five
+patterns, plus a correct honest_abstain on the genuinely-unrecognized
+fixture.
+
+The result worth dwelling on: `fixture_null_type_coercion_001`'s
+cluster legitimately produces TWO correct statistical candidates
+(`null_type_coercion` and `enum_drift` -- see "On multiple legitimate
+matches" in cluster_mismatches.py). explain() is forced to commit to
+exactly ONE matched_pattern_id via its tool schema, and it correctly
+chose `null_type_coercion`. This is the first real evidence that the
+project's central design bet -- report multiple legitimate candidates
+honestly from clustering, and let the reasoning layer disambiguate
+using the actual values, rather than hardcoding a priority rule into
+clustering itself -- actually works in practice. It's not proof the
+mechanism is bulletproof (one correct disambiguation on one fixture is
+a single data point), but it's real evidence the design choice was
+sound, not just defensible in theory.
+
+Honest caveat: 6 fixtures is a small sample for either eval mode. A
+100% result from 6 cases is a meaningfully weaker claim than 100% from
+60 -- this run proves the MECHANISM works correctly end-to-end against
+the real API, not that either layer is bulletproof at scale. Worth not
+over-reading "100% twice" as more confidence than it actually warrants.
+Expanding fixture coverage remains the natural next step before
+leaning harder on these numbers in any public claim.

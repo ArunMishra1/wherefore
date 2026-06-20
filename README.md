@@ -191,9 +191,24 @@ and is gated the same way `--explain` is in the CLI — requires
 `ANTHROPIC_API_KEY`, off by default. Run it yourself:
 `python3 -m evals.harness.run_eval --llm`.
 
-Six fixtures is a small sample — enough to prove the harness itself
-works correctly, not enough to claim robust statistical confidence.
-Expanding fixture coverage (more examples per pattern, edge cases,
+**Run for real against all 6 fixtures: 100% accuracy** — every
+`matched_pattern_id` the AI committed to matched ground truth,
+including the one fixture specifically designed to test something the
+statistical layer alone can't: `fixture_null_type_coercion_001`'s
+cluster legitimately scores two correct statistical candidates
+(`null_type_coercion` and `enum_drift` — see the dual-match note
+above), and `explain()` is forced to commit to exactly one via its
+tool schema. It picked correctly — not by defaulting to whichever
+candidate clustering listed first, but by reasoning that a genuinely
+null source becoming the literal text "NULL" points to type coercion,
+not a deliberate value rename. That's the real test of whether letting
+the AI disambiguate (rather than hardcoding a priority rule into
+clustering) was the right call, and on this sample, it was.
+
+Six fixtures is a small sample — enough to prove both the statistical
+layer and the AI layer work correctly on a real, reproducible run, not
+enough to claim robust statistical confidence at scale. Expanding
+fixture coverage (more examples per pattern, edge cases,
 multi-corruption fixtures) is tracked in
 [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
 
