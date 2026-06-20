@@ -30,6 +30,11 @@ What's real today:
 - **A working CLI**: `wherefore compare a.csv b.csv` runs against real
   files on disk and produces a report — see [Try it yourself](#try-it-yourself-with-your-own-files)
   below
+- **Batch mode**: `wherefore compare-dir source/ target/` compares
+  every matching filename across two directories in one run — the
+  real shape of a migration audit (dozens of tables, not one). One
+  report per pair, a failure on any single pair is skipped and
+  reported, not fatal to the whole batch.
 - **CSV, JSON, Parquet, and Excel (.xlsx/.xls)** all supported as
   input formats, auto-detected by file extension. Parquet specifically
   sidesteps a whole class of CSV round-trip issues this project hit
@@ -249,7 +254,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **222 passed**). It's
+dependencies, and runs the test suite (should show **230 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
 
 **No API key needed for this.** The test suite covers the AI reasoning
@@ -375,6 +380,34 @@ taxonomy has five patterns (`timezone_shift`, `truncation`,
 `enum_drift`, `null_type_coercion`, `float_precision`); more are being
 added, tracked in [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
 
+### Comparing a whole migration, not one table
+
+Real migrations are dozens of tables, not one. `compare-dir` runs the
+same comparison across every matching filename between two
+directories — `old_exports/accounts.csv` pairs with
+`new_exports/accounts.csv`, and so on:
+
+```bash
+$ wherefore compare-dir old_exports new_exports --output-dir reports
+Found 3 matching file pair(s). Comparing...
+
+  [DIFF] accounts.csv: 1 column(s) affected (timezone_shift)
+  [DIFF] patients.csv: 1 column(s) affected (truncation)
+  [OK] transactions.csv: no mismatches
+
+Done: 3 compared, 0 skipped. Reports written to reports/
+```
+
+One report per pair lands in `reports/`. Files are matched by
+identical filename only — no fuzzy matching at the file level, since
+guessing wrong about *which two tables* you're comparing is a much
+worse mistake than guessing wrong about a row key (which already has
+its own careful, opt-in `--fuzzy-keys`). A file that can't be compared
+(bad format, no detectable key) is skipped and reported — it doesn't
+abort the rest of the batch. Every flag from `compare` works here too
+(`--key`, `--fuzzy-keys`, `--explain`, `--no-redact`), applied to every
+pair in the run.
+
 <details>
 <summary>All flags</summary>
 
@@ -389,6 +422,11 @@ wherefore compare SOURCE TARGET [OPTIONS]
                                 Requires ANTHROPIC_API_KEY. Makes real, billed API calls. Off by default.
   --no-redact                  Disable automatic redaction of emails/SSNs/cards/phones before
                                 sending data to Claude with --explain. Redaction is ON by default.
+
+wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
+
+  --output-dir TEXT             Directory for one report per pair (default: reports).
+  --key, --fuzzy-keys, --confidence-threshold, --explain, --no-redact   Same as `compare`, applied to every pair.
 ```
 </details>
 

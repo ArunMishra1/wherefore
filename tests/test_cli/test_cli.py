@@ -21,6 +21,7 @@ from wherefore.cli import app
 from wherefore.reasoning.explain import ClusterExplanation
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, generate_dataset
 from wherefore.synthetic.corruptors.timezone_shift import apply
+from wherefore.synthetic.corruptors.truncation import apply as truncate
 
 runner = CliRunner()
 
@@ -325,3 +326,181 @@ def test_no_redact_flag_is_passed_through_to_explain(timezone_shift_csv_pair, mo
         ["compare", str(source_path), str(target_path), "--explain", "--no-redact", "--output", str(output_path)],
     )
     assert received_redact_values == [False]
+
+
+@pytest.fixture
+def batch_test_dirs(tmp_path):
+    """
+    A real, realistic batch test directory: one timezone_shift pair,
+    one truncation pair, one clean (no-mismatch) pair at large-enough
+    row count to clear key auto-detection, and one file present only
+    in source (must be excluded from pairing, not an error).
+    """
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+
+    s1 = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=1)
+    t1, _ = apply(s1, column="opened_at", offset_hours=5.0, affected_fraction=0.3, seed=1)
+    s1.to_csv(source_dir / "accounts.csv", index=False)
+    t1.to_csv(target_dir / "accounts.csv", index=False)
+
+    s2 = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=2)
+    t2, _ = truncate(s2, column="customer_name", max_length=8, affected_fraction=0.5, seed=1)
+    s2.to_csv(source_dir / "customers.csv", index=False)
+    t2.to_csv(target_dir / "customers.csv", index=False)
+
+    s3 = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=50, seed=3)
+    s3.to_csv(source_dir / "clean_table.csv", index=False)
+    s3.to_csv(target_dir / "clean_table.csv", index=False)
+
+    s1.to_csv(source_dir / "only_in_source.csv", index=False)  # must be excluded
+
+    return source_dir, target_dir
+
+
+def test_compare_dir_finds_and_compares_all_matching_pairs(batch_test_dirs, tmp_path):
+    source_dir, target_dir = batch_test_dirs
+    output_dir = tmp_path / "reports"
+
+    result = runner.invoke(
+        app, ["compare-dir", str(source_dir), str(target_dir), "--output-dir", str(output_dir)]
+    )
+
+    assert result.exit_code == 0
+    assert "Found 3 matching file pair(s)" in result.output  # only_in_source.csv correctly excluded
+    assert "accounts.csv" in result.output
+    assert "timezone_shift" in result.output
+    assert "customers.csv" in result.output
+    assert "truncation" in result.output
+    assert "clean_table.csv" in result.output
+    assert "no mismatches" in result.output
+    assert "Done: 3 compared, 0 skipped" in result.output
+
+
+def test_compare_dir_writes_one_report_per_pair(batch_test_dirs, tmp_path):
+    source_dir, target_dir = batch_test_dirs
+    output_dir = tmp_path / "reports"
+
+    runner.invoke(app, ["compare-dir", str(source_dir), str(target_dir), "--output-dir", str(output_dir)])
+
+    assert (output_dir / "accounts_report.md").exists()
+    assert (output_dir / "customers_report.md").exists()
+    assert (output_dir / "clean_table_report.md").exists()
+    assert not (output_dir / "only_in_source_report.md").exists()
+
+    accounts_report = (output_dir / "accounts_report.md").read_text()
+    assert "timezone_shift" in accounts_report
+
+
+def test_compare_dir_only_pairs_files_present_in_both_directories(batch_test_dirs):
+    source_dir, target_dir = batch_test_dirs
+    result = runner.invoke(
+        app, ["compare-dir", str(source_dir), str(target_dir), "--output-dir", str(source_dir.parent / "r")]
+    )
+    assert "only_in_source" not in result.output
+
+
+def test_compare_dir_skips_a_failing_pair_without_aborting_the_batch(tmp_path):
+    """
+    The core resilience guarantee: one pair that can't compare (e.g.
+    no detectable key) must be reported and skipped, not crash the
+    whole batch -- the entire point of this command is surviving a
+    large, messy real directory where SOME files might not compare cleanly.
+    """
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+
+    # A genuinely good pair
+    s1 = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=1)
+    t1, _ = apply(s1, column="opened_at", offset_hours=5.0, seed=1)
+    s1.to_csv(source_dir / "good.csv", index=False)
+    t1.to_csv(target_dir / "good.csv", index=False)
+
+    # A pair with NO shared columns at all -- key auto-detection must fail
+    pd_bad_source = source_dir / "bad.csv"
+    pd_bad_target = target_dir / "bad.csv"
+    pd_bad_source.write_text("colA,colB\n1,2\n3,4\n")
+    pd_bad_target.write_text("colC,colD\n5,6\n7,8\n")
+
+    output_dir = tmp_path / "reports"
+    result = runner.invoke(
+        app, ["compare-dir", str(source_dir), str(target_dir), "--output-dir", str(output_dir)]
+    )
+
+    assert result.exit_code == 0  # the batch completes despite one bad pair
+    assert "[SKIPPED] bad.csv" in result.output
+    assert "good.csv" in result.output
+    assert "timezone_shift" in result.output
+    assert "Done: 1 compared, 1 skipped" in result.output
+    assert (output_dir / "good_report.md").exists()
+    assert not (output_dir / "bad_report.md").exists()
+
+
+def test_compare_dir_no_matching_files_exits_with_error(tmp_path):
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+    (source_dir / "a.csv").write_text("id,val\n1,2\n")
+    (target_dir / "b.csv").write_text("id,val\n1,2\n")  # different name, no overlap
+
+    result = runner.invoke(app, ["compare-dir", str(source_dir), str(target_dir)])
+    assert result.exit_code == 1
+    assert "No matching filenames" in result.output
+
+
+def test_compare_dir_rejects_non_directory_arguments(tmp_path):
+    not_a_dir = tmp_path / "file.csv"
+    not_a_dir.write_text("id\n1\n")
+    real_dir = tmp_path / "real_dir"
+    real_dir.mkdir()
+
+    result = runner.invoke(app, ["compare-dir", str(not_a_dir), str(real_dir)])
+    assert result.exit_code == 1
+    assert "is not a directory" in result.output
+
+
+def test_compare_dir_explain_without_api_key_fails_fast(batch_test_dirs, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    source_dir, target_dir = batch_test_dirs
+
+    result = runner.invoke(app, ["compare-dir", str(source_dir), str(target_dir), "--explain"])
+    assert result.exit_code == 1
+    assert "ANTHROPIC_API_KEY" in result.output
+
+
+def test_compare_dir_aggregates_redaction_categories_across_pairs(tmp_path, monkeypatch):
+    """
+    Confirms redaction reporting is aggregated across the WHOLE batch,
+    not just the last pair processed.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-this-test-only")
+
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+
+    s1 = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=1)
+    t1, _ = apply(s1, column="opened_at", offset_hours=5.0, seed=1)
+    s1.to_csv(source_dir / "pair1.csv", index=False)
+    t1.to_csv(target_dir / "pair1.csv", index=False)
+
+    fake_explanation = ClusterExplanation(
+        matched_pattern_id="timezone_shift", confidence=0.9, narrative="x", cited_rows=[]
+    )
+
+    def _fake_explain(cluster, taxonomy_menu, provider=None, redact=True):
+        return fake_explanation, ["email"]
+
+    monkeypatch.setattr(cli_module, "explain", _fake_explain)
+
+    output_dir = tmp_path / "reports"
+    result = runner.invoke(
+        app, ["compare-dir", str(source_dir), str(target_dir), "--explain", "--output-dir", str(output_dir)]
+    )
+    assert "Redacted before sending to Claude (across all pairs): email" in result.output

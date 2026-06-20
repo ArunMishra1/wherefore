@@ -56,6 +56,83 @@ def _force_subcommand_mode() -> None:
 MIN_KEY_UNIQUENESS = 0.95  # a candidate join key column must be at least this unique to be auto-selected
 
 
+from dataclasses import dataclass
+
+
+@dataclass
+class ComparisonRunResult:
+    """
+    Structured output of running one source/target comparison, shared
+    by `compare` (one pair) and `compare_dir` (many pairs) so the
+    actual diff/cluster/explain logic lives in exactly one place.
+    Render/print/write decisions stay with the caller -- this dataclass
+    just carries what happened.
+    """
+
+    join_column: str
+    diff_result: object
+    clusters: list
+    explanations: dict
+    redaction_categories: set[str]
+
+
+def _run_comparison(
+    source_df,
+    target_df,
+    key: str | None,
+    fuzzy_keys: bool,
+    confidence_threshold: float,
+    explain_flag: bool,
+    no_redact: bool,
+) -> ComparisonRunResult:
+    """
+    The actual diff -> cluster -> (optional) explain pipeline, extracted
+    from compare() so compare_dir() can reuse it exactly rather than
+    duplicating key-detection, fuzzy-matching, and redaction-wired
+    explain() logic across two commands. Raises typer.Exit on the same
+    error conditions compare() always has (no key found, key missing
+    from a file) -- callers decide whether to abort the whole run or
+    catch and continue (compare_dir does the latter, per-pair).
+    """
+    join_column = key or _auto_detect_key(source_df, target_df)
+    if join_column is None:
+        raise ValueError("Could not auto-detect a join key column. Pass one explicitly with --key.")
+
+    if join_column not in source_df.columns or join_column not in target_df.columns:
+        raise ValueError(f"Key column {join_column!r} not found in both files.")
+
+    if fuzzy_keys:
+        source_df, target_df = _apply_fuzzy_key_resolution(source_df, target_df, join_column)
+
+    diff_result = run_diff(source_df, target_df, join_columns=join_column)
+    clusters = cluster_mismatches(diff_result, confidence_threshold=confidence_threshold)
+
+    explanations: dict[str, ClusterExplanation] = {}
+    all_redaction_categories: set[str] = set()
+    if explain_flag and clusters:
+        taxonomy_menu = build_llm_taxonomy_menu()
+        typer.echo(f"Calling Claude for {len(clusters)} cluster(s)...")
+        for cluster in clusters:
+            try:
+                explanation, categories = explain(cluster, taxonomy_menu, redact=not no_redact)
+                explanations[cluster.column] = explanation
+                all_redaction_categories.update(categories)
+            except Exception as e:
+                typer.secho(
+                    f"Warning: explain() failed for column {cluster.column!r}: {e}",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+
+    return ComparisonRunResult(
+        join_column=join_column,
+        diff_result=diff_result,
+        clusters=clusters,
+        explanations=explanations,
+        redaction_categories=all_redaction_categories,
+    )
+
+
 @app.command()
 def compare(
     source: str = typer.Argument(..., help="Path to the source CSV/JSON file"),
@@ -113,56 +190,174 @@ def compare(
         typer.secho(f"Error loading files: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 
-    join_column = key or _auto_detect_key(source_df, target_df)
-    if join_column is None:
+    try:
+        result = _run_comparison(
+            source_df, target_df, key, fuzzy_keys, confidence_threshold, explain_flag, no_redact
+        )
+    except ValueError as e:
+        typer.secho(str(e), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    if result.redaction_categories:
         typer.secho(
-            "Could not auto-detect a join key column. "
-            "Pass one explicitly with --key <column_name>.",
+            f"Redacted before sending to Claude: {', '.join(sorted(result.redaction_categories))} "
+            f"-- pass --no-redact to disable this.",
+            fg=typer.colors.YELLOW,
+        )
+
+    report = _render_report(
+        source, target, result.join_column, result.diff_result, result.clusters, result.explanations
+    )
+    Path(output).write_text(report)
+
+    _print_summary(result.diff_result, result.clusters, output, result.explanations)
+
+
+@app.command(name="compare-dir")
+def compare_dir(
+    source_dir: str = typer.Argument(..., help="Directory of source files."),
+    target_dir: str = typer.Argument(..., help="Directory of target files with matching filenames."),
+    output_dir: str = typer.Option(
+        "reports", "--output-dir", help="Directory to write one report per matched file pair."
+    ),
+    key: str = typer.Option(
+        None, "--key", help="Join key column name, applied to every pair. If omitted, auto-detected per pair."
+    ),
+    fuzzy_keys: bool = typer.Option(False, "--fuzzy-keys", help="Allow approximate key matching, applied to every pair."),
+    confidence_threshold: float = typer.Option(
+        DEFAULT_CONFIDENCE_THRESHOLD, "--confidence-threshold", help="Minimum confidence for a pattern match."
+    ),
+    explain_flag: bool = typer.Option(
+        False, "--explain", help="Call the real Claude API for every pair with mismatches. Requires ANTHROPIC_API_KEY."
+    ),
+    no_redact: bool = typer.Option(False, "--no-redact", help="Disable redaction for all pairs."),
+) -> None:
+    """
+    Compare every matching file pair across two directories -- the
+    real-world shape of a migration audit, where you're checking dozens
+    of tables, not one. Files are matched by IDENTICAL FILENAME between
+    source_dir and target_dir (e.g. source_dir/accounts.csv pairs with
+    target_dir/accounts.csv) -- the same mental model as "same table,
+    same name, different environment," and deliberately simple: no
+    fuzzy filename matching, since guessing wrong at the FILE level
+    (comparing the wrong two tables) is a much worse mistake than
+    guessing wrong at the row-key level, which already has its own
+    careful, opt-in fuzzy-matching path (--fuzzy-keys).
+
+    Writes one report per pair into output_dir (named after the
+    source file), plus a one-line summary per pair to the terminal,
+    and a final tally. A failure on one pair (e.g. unrecognized file
+    format, no detectable key) is reported and skipped -- it does NOT
+    abort the whole batch, since the entire point of this command is
+    surviving a large, messy real-world directory where a handful of
+    files might not compare cleanly.
+
+    Example:
+        wherefore compare-dir old_exports/ new_exports/ --output-dir reports/
+    """
+    if explain_flag and not os.environ.get("ANTHROPIC_API_KEY"):
+        typer.secho(
+            "Error: --explain requires ANTHROPIC_API_KEY to be set in your environment.\n"
+            'Run: export ANTHROPIC_API_KEY="sk-ant-..." before using --explain.',
             fg=typer.colors.RED,
             err=True,
         )
         raise typer.Exit(code=1)
 
-    if join_column not in source_df.columns or join_column not in target_df.columns:
+    source_path = Path(source_dir)
+    target_path = Path(target_dir)
+    if not source_path.is_dir():
+        typer.secho(f"Error: {source_dir!r} is not a directory.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+    if not target_path.is_dir():
+        typer.secho(f"Error: {target_dir!r} is not a directory.", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    pairs = _match_files_by_name(source_path, target_path)
+    if not pairs:
         typer.secho(
-            f"Key column {join_column!r} not found in both files.", fg=typer.colors.RED, err=True
+            f"No matching filenames found between {source_dir!r} and {target_dir!r}.",
+            fg=typer.colors.RED,
+            err=True,
         )
         raise typer.Exit(code=1)
 
-    if fuzzy_keys:
-        source_df, target_df = _apply_fuzzy_key_resolution(source_df, target_df, join_column)
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
-    diff_result = run_diff(source_df, target_df, join_columns=join_column)
-    clusters = cluster_mismatches(diff_result, confidence_threshold=confidence_threshold)
+    typer.echo(f"Found {len(pairs)} matching file pair(s). Comparing...")
+    typer.echo()
 
-    explanations: dict[str, ClusterExplanation] = {}
+    succeeded = 0
+    failed = 0
     all_redaction_categories: set[str] = set()
-    if explain_flag and clusters:
-        taxonomy_menu = build_llm_taxonomy_menu()
-        typer.echo(f"Calling Claude for {len(clusters)} cluster(s)...")
-        for cluster in clusters:
-            try:
-                explanation, categories = explain(cluster, taxonomy_menu, redact=not no_redact)
-                explanations[cluster.column] = explanation
-                all_redaction_categories.update(categories)
-            except Exception as e:
-                typer.secho(
-                    f"Warning: explain() failed for column {cluster.column!r}: {e}",
-                    fg=typer.colors.YELLOW,
-                    err=True,
-                )
 
-        if all_redaction_categories:
-            typer.secho(
-                f"Redacted before sending to Claude: {', '.join(sorted(all_redaction_categories))} "
-                f"-- pass --no-redact to disable this.",
-                fg=typer.colors.YELLOW,
+    for source_file, target_file in pairs:
+        pair_label = source_file.name
+        try:
+            source_df = load_file(str(source_file))
+            target_df = load_file(str(target_file))
+        except (FileNotFoundError, ValueError, UnicodeDecodeError) as e:
+            typer.secho(f"  [SKIPPED] {pair_label}: error loading files: {e}", fg=typer.colors.RED)
+            failed += 1
+            continue
+
+        try:
+            result = _run_comparison(
+                source_df, target_df, key, fuzzy_keys, confidence_threshold, explain_flag, no_redact
             )
+        except ValueError as e:
+            typer.secho(f"  [SKIPPED] {pair_label}: {e}", fg=typer.colors.RED)
+            failed += 1
+            continue
 
-    report = _render_report(source, target, join_column, diff_result, clusters, explanations)
-    Path(output).write_text(report)
+        all_redaction_categories.update(result.redaction_categories)
 
-    _print_summary(diff_result, clusters, output, explanations)
+        report = _render_report(
+            str(source_file), str(target_file), result.join_column,
+            result.diff_result, result.clusters, result.explanations,
+        )
+        report_path = output_path / f"{source_file.stem}_report.md"
+        report_path.write_text(report)
+
+        if not result.clusters:
+            typer.secho(f"  [OK] {pair_label}: no mismatches", fg=typer.colors.GREEN)
+        else:
+            pattern_summary = ", ".join(
+                p.pattern_id
+                for c in result.clusters
+                for p in c.candidate_patterns
+            ) or "unrecognized pattern(s)"
+            typer.secho(
+                f"  [DIFF] {pair_label}: {len(result.clusters)} column(s) affected ({pattern_summary})",
+                fg=typer.colors.CYAN,
+            )
+        succeeded += 1
+
+    typer.echo()
+    if all_redaction_categories:
+        typer.secho(
+            f"Redacted before sending to Claude (across all pairs): "
+            f"{', '.join(sorted(all_redaction_categories))} -- pass --no-redact to disable this.",
+            fg=typer.colors.YELLOW,
+        )
+    typer.secho(f"Done: {succeeded} compared, {failed} skipped. Reports written to {output_dir}/", fg=typer.colors.GREEN)
+
+
+def _match_files_by_name(source_dir: Path, target_dir: Path) -> list[tuple[Path, Path]]:
+    """
+    Matches files between two directories by IDENTICAL FILENAME --
+    deliberately simple, no fuzzy matching at the file level (see
+    compare_dir's docstring for why). Only files present in BOTH
+    directories are paired; files unique to one side are silently
+    excluded from the pairing (not an error -- a real migration
+    directory listing might legitimately have a new or removed table).
+    Returns pairs sorted by filename for deterministic output ordering.
+    """
+    source_files = {p.name: p for p in source_dir.iterdir() if p.is_file()}
+    target_files = {p.name: p for p in target_dir.iterdir() if p.is_file()}
+    common_names = sorted(set(source_files) & set(target_files))
+    return [(source_files[name], target_files[name]) for name in common_names]
 
 
 def _auto_detect_key(source_df, target_df) -> str | None:

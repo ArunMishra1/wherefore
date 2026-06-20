@@ -575,3 +575,43 @@ catch, written to avoid overclaiming "PII protection" when the real
 claim is narrower and more honest: structured-pattern detection.
 
 222 tests passing.
+
+## Batch mode: compare-dir
+
+A second CLI subcommand, `compare-dir`, compares every matching
+filename across two directories in one run -- the real shape of a
+migration audit (dozens of tables, not one), versus running `compare`
+by hand once per pair.
+
+Design decisions made deliberately, not defaulted into:
+- Files are matched by IDENTICAL FILENAME only, no fuzzy matching at
+  the file level. Guessing wrong about WHICH TWO TABLES you're
+  comparing is a much worse mistake than guessing wrong about a row
+  key -- which already has its own careful, opt-in --fuzzy-keys path.
+  Files present in only one directory are silently excluded from
+  pairing (not an error -- a real migration directory listing can
+  legitimately have a new or removed table).
+- A failure on any single pair (bad format, no detectable key) is
+  reported and SKIPPED, not fatal to the whole batch -- confirmed via
+  a real test with one genuinely good pair and one pair with no shared
+  columns at all; the batch completes with exit code 0, correctly
+  reporting 1 compared, 1 skipped.
+- The core diff/cluster/explain logic was extracted from `compare()`
+  into a shared `_run_comparison()` helper during this work, so
+  `compare` and `compare-dir` share exactly one implementation of key
+  detection, fuzzy matching, and redacted explain() calls -- not two
+  copies that could drift apart. Caught and fixed a real ordering
+  regression during the refactor: the "Calling Claude for N
+  cluster(s)..." message was being printed AFTER the API calls
+  happened rather than before, since it got left behind in the wrong
+  function during extraction; fixed by moving it inside
+  _run_comparison next to the actual loop.
+- Redaction categories are aggregated ACROSS the whole batch, not
+  reset per pair, so the final summary tells you everything that was
+  masked across every file, not just the last one processed.
+
+Real test fixtures used directly-generated data with multiple real
+patterns (timezone_shift, truncation) plus a genuinely clean pair and
+a deliberately-unmatched file, confirming the pairing, skip, and
+report-writing behavior all work correctly together -- not just each
+piece in isolation. 230 tests passing.
