@@ -1,35 +1,167 @@
 """
 reasoning/explain.py
 
-NEXT TURN: implement this.
+The single `explain()` interface the rest of the codebase calls,
+regardless of which underlying model/provider answers it.
 
-Purpose: the single `explain()` interface the rest of the codebase
-calls, regardless of which underlying model/provider answers it. This
-is what makes the model swappable later, per the spec.
+Flow:
+    explanation = explain(cluster, taxonomy_menu)
+        -> provider = get_provider()          # reads env, returns a Provider
+        -> prompt = build_prompt(cluster, taxonomy_menu)
+        -> raw_json = provider.complete(system_prompt, user_prompt)
+        -> return ClusterExplanation.model_validate_json(raw_json)
 
-Planned shape:
+`ClusterExplanation` IS the eval target later -- evals/harness/scoring.py
+will compare `matched_pattern_id` against synthetic ground truth to
+compute precision/recall per corruption type. Keep this schema stable
+once evals are running against it.
 
-    def explain(cluster: MismatchCluster, candidate_patterns: list[PatternMatch]) -> ClusterExplanation:
-        provider = get_provider()  # reads config/env, returns a Provider instance
-        prompt = build_prompt(cluster, candidate_patterns)  # from prompts/ templates
-        raw_response = provider.complete(prompt)
-        return parse_explanation(raw_response)  # validated against ClusterExplanation schema
-
-`Provider` is an ABC (providers/base.py) with one required method,
-`complete(prompt: str) -> str`. providers/claude.py implements it
-against the Anthropic SDK. Swapping models later means writing a new
-Provider subclass -- nothing else in this file or upstream changes.
-
-ClusterExplanation (return type, to be defined likely in this file or
-a sibling schema.py) should capture, at minimum:
-  - matched_pattern_id: str | None  (None = "unrecognized pattern")
-  - confidence: float
-  - narrative: str  (the plain-English explanation)
-  - cited_example_rows: list[...]  (specific rows referenced, per spec
-    requirement that the report cites real examples per cluster)
-
-This return shape IS the eval target -- evals/harness/scoring.py
-compares `matched_pattern_id` against the synthetic ground truth label
-to compute precision/recall per corruption type. Keep this schema
-stable once evals are running against it.
+Design note on Provider.complete()'s signature: it stays plain
+text-in/text-out (system_prompt, user_prompt) -> str, even though the
+Claude provider internally uses tool-use to FORCE that string to be
+valid JSON. This keeps providers swappable -- a future provider that
+doesn't support native tool-use can still implement the same
+interface by returning a JSON string however it manages to produce
+one (e.g. asking for JSON in prose and accepting the parsing risk).
+Reliability of the Claude implementation specifically comes from HOW
+ClaudeProvider implements complete(), not from the interface itself.
 """
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+from pydantic import BaseModel, Field, field_validator
+
+from wherefore.clustering.cluster_mismatches import Cluster
+from wherefore.reasoning.providers.base import Provider
+
+PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "cluster_explanation_v1.md"
+MAX_EXAMPLE_ROWS_IN_PROMPT = 8  # cap prompt size; report.py can show more from the cluster directly
+
+
+class CitedRow(BaseModel):
+    """One example row cited in the explanation. Keeping this as
+    structured data (not free text embedded in the narrative) is what
+    lets report.py render it consistently and lets the eval harness
+    later check that cited rows are real rows from the cluster, not
+    fabricated."""
+
+    key: dict
+    source_value: str
+    target_value: str
+
+
+class ClusterExplanation(BaseModel):
+    """
+    The structured output of the reasoning layer for one cluster. This
+    is what explain() returns, what the Claude provider is forced (via
+    tool-use) to produce, and what the eval harness will eventually
+    score against ground truth.
+    """
+
+    matched_pattern_id: str | None = Field(
+        description="The pattern_id this cluster's cause was attributed to, "
+        "or null if the LLM concluded none of the candidate patterns "
+        "(or no pattern at all) actually explains it."
+    )
+    confidence: float = Field(
+        ge=0.0,
+        le=1.0,
+        description="The LLM's own confidence in this attribution -- "
+        "independent of, and not required to match, clustering's "
+        "statistical confidence score for the same pattern.",
+    )
+    narrative: str = Field(
+        description="2-4 sentence plain-English explanation of the likely "
+        "cause, written for a data engineer who has 30 seconds."
+    )
+    cited_rows: list[CitedRow] = Field(
+        default_factory=list,
+        description="Specific example rows supporting the narrative.",
+    )
+
+    @field_validator("narrative")
+    @classmethod
+    def narrative_is_not_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("narrative must not be empty")
+        return v
+
+
+def build_prompt(cluster: Cluster, taxonomy_menu: str) -> tuple[str, str]:
+    """
+    Builds (system_prompt, user_prompt) from the versioned template.
+    Returns the literal text Claude (or any provider) receives -- kept
+    as a separate, testable function so prompt construction can be
+    unit-tested without any API call.
+    """
+    template = PROMPT_TEMPLATE_PATH.read_text()
+
+    # Strip the leading HTML comment block (dev-facing notes about
+    # prompt versioning -- not meant for the model). Confirmed by
+    # direct testing that without this, the entire comment leaked into
+    # the system prompt verbatim, since "# System Prompt" appears
+    # AFTER the comment closes, not before it.
+    if template.startswith("<!--"):
+        _, _, template = template.partition("-->")
+
+    system_part, _, user_template = template.partition("# User Prompt Template")
+
+    system_prompt = system_part.replace("# System Prompt", "").strip()
+    system_prompt = system_prompt.replace("{taxonomy_menu}", taxonomy_menu)
+
+    example_rows = cluster.mismatches[:MAX_EXAMPLE_ROWS_IN_PROMPT]
+    example_rows_text = "\n".join(
+        f"- key={m.key!r}: source={m.source_value!r} -> target={m.target_value!r}"
+        for m in example_rows
+    )
+    if len(cluster.mismatches) > MAX_EXAMPLE_ROWS_IN_PROMPT:
+        remaining = len(cluster.mismatches) - MAX_EXAMPLE_ROWS_IN_PROMPT
+        row_word = "row" if remaining == 1 else "rows"
+        example_rows_text += f"\n- ... and {remaining} more {row_word} not shown"
+
+    if cluster.candidate_patterns:
+        candidates_text = "\n".join(
+            f"- {p.pattern_id} (signature '{p.signature_name}' fired with "
+            f"statistical confidence {p.confidence:.2f})"
+            for p in cluster.candidate_patterns
+        )
+    else:
+        candidates_text = "None -- no known pattern's statistical signature matched this cluster."
+
+    user_prompt = (
+        user_template.strip()
+        .replace("{cluster_summary}", f"Column `{cluster.column}`, {len(cluster.mismatches)} mismatched row(s).")
+        .replace("{detection_hint_result}", candidates_text)
+        .replace("{candidate_patterns}", candidates_text)
+        .replace("{example_rows}", example_rows_text)
+    )
+
+    return system_prompt, user_prompt
+
+
+def explain(cluster: Cluster, taxonomy_menu: str, provider: Provider | None = None) -> ClusterExplanation:
+    """
+    Takes a statistically-analyzed cluster and produces a plain-English
+    explanation. `provider` defaults to the Claude provider if not
+    given (lazy import to avoid requiring the anthropic SDK / API key
+    for callers who only need build_prompt or testing with a fake
+    provider).
+    """
+    if provider is None:
+        from wherefore.reasoning.providers.claude import ClaudeProvider
+
+        provider = ClaudeProvider()
+
+    system_prompt, user_prompt = build_prompt(cluster, taxonomy_menu)
+    raw_json = provider.complete(system_prompt, user_prompt)
+
+    try:
+        return ClusterExplanation.model_validate_json(raw_json)
+    except (ValueError, json.JSONDecodeError) as e:
+        raise ValueError(
+            f"Provider returned a response that doesn't match ClusterExplanation: {e}\n"
+            f"Raw response: {raw_json[:500]}"
+        ) from e

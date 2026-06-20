@@ -1,19 +1,30 @@
 """
 reasoning/providers/base.py
 
-NEXT TURN: implement this.
+The ABC every model provider implements. Deliberately minimal -- one
+method -- so swapping models is a small, obvious diff.
 
-Purpose: the ABC every model provider implements. Deliberately minimal
--- one method -- so swapping models is a small, obvious diff.
-
-    class Provider(ABC):
-        @abstractmethod
-        def complete(self, system_prompt: str, user_prompt: str) -> str:
-            '''Send prompt, return raw text response.'''
-
-Keep this interface text-in/text-out. Structured parsing of the
-response into ClusterExplanation happens in explain.py, NOT here --
-that keeps provider implementations swappable even if we later want a
-provider that returns structured JSON natively (e.g. via tool use)
-vs. one that returns free text we parse ourselves.
+Interface is plain text-in/text-out, even though ClaudeProvider
+internally uses tool-use to FORCE its output to be valid JSON (see
+explain.py's module docstring for the reasoning). The interface itself
+doesn't assume any particular mechanism for achieving that reliability
+-- a future provider can implement it however it needs to.
 """
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+
+
+class Provider(ABC):
+    @abstractmethod
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        """
+        Send the prompt, return a raw string response. The caller
+        (explain.py) expects this string to be parseable as a
+        ClusterExplanation JSON object -- it's the provider's job to
+        make that reliably true, by whatever mechanism it has
+        available (tool-use, structured output mode, careful prompting
+        plus retry, etc.).
+        """
+        raise NotImplementedError

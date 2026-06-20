@@ -133,7 +133,36 @@ dtype/resolution on is a candidate for this exact failure mode if it
 relies on a library's default inference rather than an explicit cast
 -- worth a quick audit if another resolution-sensitive bug surfaces.
 
-117 tests passing.
+## Reasoning layer (reasoning/explain.py, reasoning/providers/)
+
+The reasoning layer is now built: `explain.py` (ClusterExplanation
+schema + build_prompt + explain()), `providers/base.py` (the Provider
+ABC), `providers/claude.py` (real Anthropic SDK integration using
+FORCED tool-use -- tool_choice={"type": "tool", "name": ...} -- so
+Claude can't return free-text prose; it must call the tool with
+arguments matching ClusterExplanation's schema, derived directly from
+`ClusterExplanation.model_json_schema()` so the tool definition can
+never silently drift from the pydantic model).
+
+Two real bugs were caught and fixed while building this, found by
+actually running build_prompt() against real cluster data (not by
+inspection): the prompt template's leading HTML dev-comment was
+leaking verbatim into the system prompt sent to the model (fixed by
+stripping it before parsing), and a "1 more rows not shown" grammar
+bug when exactly one row was truncated from the example list.
+
+**Honest status: NOT YET VERIFIED AGAINST THE LIVE API.** Everything
+above is tested via a FakeProvider (tests/test_reasoning/test_explain.py)
+that returns canned JSON -- this validates prompt construction, schema
+validation, and error handling deterministically, but says nothing
+about whether real Claude responses are actually GOOD explanations,
+or whether the forced tool-use call works exactly as designed against
+the real API. This needs a real ANTHROPIC_API_KEY to verify -- next
+step once a key is available: run explain() against all three real
+patterns' fixtures, read the actual narratives, and iterate the prompt
+if needed (as cluster_explanation_v2.md, per the versioning convention).
+
+127 tests passing.
 
 ## Future, deliberately deferred (not now)
 

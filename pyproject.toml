@@ -28,7 +28,9 @@ dependencies = [
     "pydantic>=2.0",
     "pyyaml>=6.0",
     "typer>=0.12",
-    "anthropic>=0.30",
+    "anthropic>=0.110",  # providers/claude.py built and verified against 0.111.0's
+                          # tool_choice={"type": "tool", "name": ...} shape; the
+                          # 0.30 floor previously here was untested against this code.
     "rapidfuzz>=3.0",   # fuzzy key matching for comparison engine
 ]
 

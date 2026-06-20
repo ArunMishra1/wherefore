@@ -50,12 +50,22 @@ What's real today:
   false-positive bug caught and fixed between `truncation` and
   `enum_drift` (both target string columns) — see
   [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md)
+- The AI reasoning layer is built: a `ClusterExplanation` schema, a
+  swappable `Provider` interface, and a real Claude integration that
+  uses *forced* tool-use so the model can't return free-text prose —
+  it must call a tool whose schema is generated directly from the
+  pydantic model, so the two can't silently drift apart. **Not yet
+  verified against the live API** — tested so far via a fake provider
+  that proves prompt construction, schema validation, and error
+  handling all work correctly, but real output quality is still
+  unconfirmed. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for exactly
+  what's verified vs. pending.
 
-What's not built yet: the AI reasoning layer that turns a statistical
-match into a plain-English causal explanation, and the eval harness
-scoring loop. Until the reasoning layer exists, the CLI report shows
-*what* was statistically detected, not *why* it happened — the report
-says this explicitly so nobody mistakes a confidence score for an
+What's not built yet: the eval harness scoring loop, and live
+verification that the AI reasoning layer's narratives are actually
+good. The CLI does not yet call the reasoning layer at all — it still
+shows *what* was statistically detected, not *why* it happened — the
+report says this explicitly so nobody mistakes a confidence score for an
 explanation. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live
 build queue.
 
@@ -145,8 +155,17 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **117 passed**). It's
+dependencies, and runs the test suite (should show **127 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
+
+**No API key needed for this.** The test suite covers the AI reasoning
+layer entirely with a fake provider — no network calls, no cost. An
+`ANTHROPIC_API_KEY` is only needed if you want to actually run
+`explain()` against the real Claude API:
+
+```bash
+export ANTHROPIC_API_KEY="sk-ant-..."
+```
 
 After the first run, activate the environment in new shells with:
 
