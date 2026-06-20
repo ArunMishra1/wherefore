@@ -50,24 +50,28 @@ What's real today:
   false-positive bug caught and fixed between `truncation` and
   `enum_drift` (both target string columns) — see
   [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md)
-- The AI reasoning layer is built: a `ClusterExplanation` schema, a
-  swappable `Provider` interface, and a real Claude integration that
-  uses *forced* tool-use so the model can't return free-text prose —
-  it must call a tool whose schema is generated directly from the
-  pydantic model, so the two can't silently drift apart. **Not yet
-  verified against the live API** — tested so far via a fake provider
-  that proves prompt construction, schema validation, and error
-  handling all work correctly, but real output quality is still
-  unconfirmed. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for exactly
-  what's verified vs. pending.
+- The AI reasoning layer is built and **verified against the real
+  Claude API**: a `ClusterExplanation` schema, a swappable `Provider`
+  interface, and a real Claude integration that uses *forced* tool-use
+  so the model can't return free-text prose — it must call a tool
+  whose schema is generated directly from the pydantic model, so the
+  two can't silently drift apart. Tested against real fixtures from
+  all three patterns plus a genuinely unrecognized case — across all
+  four, the model gave sound causal reasoning, correctly ruled out
+  competing explanations using the actual data, and correctly refused
+  to force-fit a pattern when none applied. See
+  [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the full results.
+- **Wired into the CLI** behind an explicit `--explain` flag — off by
+  default, so the tool stays free and key-free for anyone just trying
+  it out. With `--explain` (and `ANTHROPIC_API_KEY` set), the report
+  shows the AI's narrative *alongside* the statistical evidence it was
+  reasoned from, not instead of it — so you can verify the claim
+  against the raw data yourself.
 
-What's not built yet: the eval harness scoring loop, and live
-verification that the AI reasoning layer's narratives are actually
-good. The CLI does not yet call the reasoning layer at all — it still
-shows *what* was statistically detected, not *why* it happened — the
-report says this explicitly so nobody mistakes a confidence score for an
-explanation. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live
-build queue.
+What's not built yet: the eval harness scoring loop that runs this at
+scale against many labeled fixtures and computes precision/recall per
+corruption type. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the
+live build queue.
 
 ## The problem, in plain terms
 
@@ -155,7 +159,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **127 passed**). It's
+dependencies, and runs the test suite (should show **131 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
 
 **No API key needed for this.** The test suite covers the AI reasoning
@@ -231,17 +235,42 @@ Full report written to report.md
 
 That confidence score is a real, deterministic measurement — every
 mismatched value differs from its source by exactly the same 5-hour
-delta, which is the statistical signature `wherefore` checks for. It
-is **not** an AI saying "this looks like a timezone bug" — that
-narrative layer doesn't exist yet (see [Status](#status)). What you get
-today is the honest middle step: real diffing, real grouping, real
-pattern matching against a known taxonomy, with the gap to "and here's
-why" stated plainly in the report itself.
+delta, which is the statistical signature `wherefore` checks for. By
+default that's *all* you get — real diffing, real grouping, real
+pattern matching, with no AI involved and no API key needed.
+
+To get an actual plain-English explanation of *why* this happened —
+not just confirmation that the pattern matched — add `--explain`
+(requires `ANTHROPIC_API_KEY`; this makes a real, billed API call per
+cluster):
+
+```bash
+$ wherefore compare old_export.csv new_export.csv --explain
+Calling Claude for 1 cluster(s)...
+Compared 5 source rows against 5 target rows.
+Matched rows: 5
+  hire_date: 5 mismatches, matches 'timezone_shift' (confidence 1.00)
+    AI: Every affected row is shifted forward by exactly 5 hours,
+    consistent with a UTC-vs-local-time mismatch introduced during
+    the export. Likely cause: the source system's timestamps were
+    re-interpreted in the wrong timezone during migration.
+
+Full report written to report.md
+```
+
+The report includes the AI's narrative *alongside* the statistical
+evidence it was reasoned from — not instead of it — so you can check
+the claim against the actual data yourself rather than trusting it
+blindly.
 
 If nothing in the taxonomy matches what's actually wrong in your data,
 `wherefore` says so — `pattern unrecognized` — rather than forcing a
-guess. Right now the taxonomy has three patterns (`timezone_shift`,
-`truncation`, `enum_drift`); more are being added, tracked in
+guess, and (with `--explain`) the AI does the same: in testing, it
+correctly identified a genuinely random, non-matching corruption and
+proposed real alternative hypotheses (a bad join, a mis-wired column)
+instead of inventing a pattern that wasn't there. Right now the
+taxonomy has three patterns (`timezone_shift`, `truncation`,
+`enum_drift`); more are being added, tracked in
 [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
 
 <details>
@@ -254,6 +283,8 @@ wherefore compare SOURCE TARGET [OPTIONS]
   --fuzzy-keys                 Allow approximate key matching (e.g. 'CUST-001' vs 'CUST001').
   --output TEXT                Where to write the report (default: report.md).
   --confidence-threshold FLOAT Minimum confidence to count as a pattern match (default: 0.9).
+  --explain                    Generate plain-English AI explanations via the Claude API.
+                                Requires ANTHROPIC_API_KEY. Makes real, billed API calls. Off by default.
 ```
 </details>
 

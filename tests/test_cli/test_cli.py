@@ -10,10 +10,15 @@ showed as "unrecognized" despite scoring 1.0 confidence in memory).
 Both are covered explicitly below so they can't silently regress.
 """
 
+import json
+import os
+
 import pytest
 from typer.testing import CliRunner
 
+import wherefore.cli as cli_module
 from wherefore.cli import app
+from wherefore.reasoning.explain import ClusterExplanation
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, generate_dataset
 from wherefore.synthetic.corruptors.timezone_shift import apply
 
@@ -161,3 +166,104 @@ def test_confidence_threshold_flag_is_respected(timezone_shift_csv_pair):
     )
     assert result.exit_code == 0
     assert "timezone_shift" in result.output
+
+
+def test_explain_flag_off_by_default_makes_no_explanation_calls(timezone_shift_csv_pair, monkeypatch):
+    """
+    Confirms the core safety property: without --explain, explain()
+    must never be called -- no network call, no API cost, no key
+    required. Monkeypatches explain() to raise if called at all, so
+    this test fails loudly if that default ever silently changes.
+    """
+    source_path, target_path = timezone_shift_csv_pair
+    output_path = source_path.parent / "report.md"
+
+    def _fail_if_called(*args, **kwargs):
+        raise AssertionError("explain() must not be called when --explain is not passed")
+
+    monkeypatch.setattr(cli_module, "explain", _fail_if_called)
+
+    result = runner.invoke(
+        app, ["compare", str(source_path), str(target_path), "--output", str(output_path)]
+    )
+    assert result.exit_code == 0
+    report_text = output_path.read_text()
+    assert "statistical findings only" in report_text
+    assert "--explain" in report_text
+
+
+def test_explain_flag_without_api_key_fails_fast_before_any_work(timezone_shift_csv_pair, monkeypatch):
+    """
+    --explain without ANTHROPIC_API_KEY must fail immediately, before
+    loading files or running the diff -- not partway through, and not
+    with a confusing API-level error.
+    """
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    source_path, target_path = timezone_shift_csv_pair
+
+    result = runner.invoke(app, ["compare", str(source_path), str(target_path), "--explain"])
+    assert result.exit_code == 1
+    assert "ANTHROPIC_API_KEY" in result.output
+
+
+def test_explain_flag_with_fake_provider_populates_report_and_terminal_output(
+    timezone_shift_csv_pair, monkeypatch
+):
+    """
+    With a real (fake) explanation available, confirms it actually
+    flows into both the rendered Markdown report AND the terminal
+    summary output -- not just one or the other.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-this-test-only")
+
+    fake_explanation = ClusterExplanation(
+        matched_pattern_id="timezone_shift",
+        confidence=0.97,
+        narrative="This is a fake AI narrative used only to test CLI wiring.",
+        cited_rows=[],
+    )
+
+    def _fake_explain(cluster, taxonomy_menu, provider=None):
+        return fake_explanation
+
+    monkeypatch.setattr(cli_module, "explain", _fake_explain)
+
+    source_path, target_path = timezone_shift_csv_pair
+    output_path = source_path.parent / "report.md"
+
+    result = runner.invoke(
+        app, ["compare", str(source_path), str(target_path), "--explain", "--output", str(output_path)]
+    )
+
+    assert result.exit_code == 0
+    assert "fake AI narrative used only to test CLI wiring" in result.output  # terminal
+    report_text = output_path.read_text()
+    assert "fake AI narrative used only to test CLI wiring" in report_text  # report
+    assert "AI explanation" in report_text
+    assert "0.97" in report_text
+
+
+def test_explain_flag_handles_per_cluster_failure_gracefully(timezone_shift_csv_pair, monkeypatch):
+    """
+    If explain() raises for a given cluster (e.g. a transient API
+    error), the CLI should warn and continue producing a report with
+    statistical detail for that cluster, not crash the whole run.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-this-test-only")
+
+    def _failing_explain(cluster, taxonomy_menu, provider=None):
+        raise RuntimeError("simulated API failure")
+
+    monkeypatch.setattr(cli_module, "explain", _failing_explain)
+
+    source_path, target_path = timezone_shift_csv_pair
+    output_path = source_path.parent / "report.md"
+
+    result = runner.invoke(
+        app, ["compare", str(source_path), str(target_path), "--explain", "--output", str(output_path)]
+    )
+
+    assert result.exit_code == 0  # the run completes despite the explain() failure
+    assert "Warning" in result.output
+    report_text = output_path.read_text()
+    assert "timezone_shift" in report_text  # statistical detail still present

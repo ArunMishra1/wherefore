@@ -1,33 +1,42 @@
 """
 cli.py
 
-The `wherefore compare` command. Currently wires together everything
-that's real: loaders -> (exact or fuzzy key resolution) ->
-diff_engine -> cluster_mismatches -> a Markdown report of statistical
-findings.
+The `wherefore compare` command. Wires together everything that's
+real: loaders -> (exact or fuzzy key resolution) -> diff_engine ->
+cluster_mismatches -> a Markdown report.
 
-What this does NOT do yet: the AI reasoning layer doesn't exist, so
-the report below shows WHAT was found (clusters, candidate pattern
-matches, confidence scores) but not a plain-English causal narrative.
-This is intentional, not a placeholder dressed up as a feature -- the
-report says so explicitly (see _render_report's header) so nobody
-mistakes "statistically matches timezone_shift at 1.00 confidence" for
-an AI-written explanation of why it happened.
+By default, the report shows statistical findings only -- zero
+network calls, zero API cost, no key required. This is the default
+specifically so anyone can clone the repo and try the tool for free
+without needing an Anthropic API key (see README "Try it yourself").
+
+Pass --explain to additionally call the real AI reasoning layer
+(explain()) for each cluster and include its plain-English narrative
+in the report ALONGSIDE the statistical detail -- not replacing it,
+so a reader can see both the AI's causal claim and the raw evidence it
+reasoned from side by side, rather than trusting the narrative blindly.
+--explain requires ANTHROPIC_API_KEY to be set; this is checked up
+front, before any diffing/clustering work, so a missing key fails fast
+with a clear message instead of partway through a run.
 """
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import typer
 
 from wherefore.clustering.cluster_mismatches import (
     DEFAULT_CONFIDENCE_THRESHOLD,
+    Cluster,
     cluster_mismatches,
 )
 from wherefore.comparison.diff_engine import compare as run_diff
 from wherefore.comparison.key_matching import fuzzy_match_keys
 from wherefore.comparison.loaders import load_file
+from wherefore.reasoning.explain import ClusterExplanation, explain
+from wherefore.taxonomy.registry import build_llm_taxonomy_menu
 
 app = typer.Typer()
 
@@ -65,6 +74,13 @@ def compare(
         "--confidence-threshold",
         help="Minimum confidence (0-1) for a statistical signature to count as a pattern match.",
     ),
+    explain_flag: bool = typer.Option(
+        False,
+        "--explain",
+        help="Call the real Claude API to generate plain-English causal narratives for each "
+        "cluster, in addition to the statistical detail. Requires ANTHROPIC_API_KEY to be "
+        "set. Makes real network calls and incurs real API cost -- off by default.",
+    ),
 ) -> None:
     """
     Compare two datasets and show what's different, grouped by pattern
@@ -72,7 +88,17 @@ def compare(
 
     Example:
         wherefore compare old_export.csv new_export.csv --output report.md
+        wherefore compare old_export.csv new_export.csv --explain
     """
+    if explain_flag and not os.environ.get("ANTHROPIC_API_KEY"):
+        typer.secho(
+            "Error: --explain requires ANTHROPIC_API_KEY to be set in your environment.\n"
+            'Run: export ANTHROPIC_API_KEY="sk-ant-..." before using --explain.',
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
     try:
         source_df = load_file(source)
         target_df = load_file(target)
@@ -102,10 +128,24 @@ def compare(
     diff_result = run_diff(source_df, target_df, join_columns=join_column)
     clusters = cluster_mismatches(diff_result, confidence_threshold=confidence_threshold)
 
-    report = _render_report(source, target, join_column, diff_result, clusters)
+    explanations: dict[str, ClusterExplanation] = {}
+    if explain_flag and clusters:
+        taxonomy_menu = build_llm_taxonomy_menu()
+        typer.echo(f"Calling Claude for {len(clusters)} cluster(s)...")
+        for cluster in clusters:
+            try:
+                explanations[cluster.column] = explain(cluster, taxonomy_menu)
+            except Exception as e:
+                typer.secho(
+                    f"Warning: explain() failed for column {cluster.column!r}: {e}",
+                    fg=typer.colors.YELLOW,
+                    err=True,
+                )
+
+    report = _render_report(source, target, join_column, diff_result, clusters, explanations)
     Path(output).write_text(report)
 
-    _print_summary(diff_result, clusters, output)
+    _print_summary(diff_result, clusters, output, explanations)
 
 
 def _auto_detect_key(source_df, target_df) -> str | None:
@@ -167,7 +207,8 @@ def _apply_fuzzy_key_resolution(source_df, target_df, join_column):
     return source_df, target_df
 
 
-def _render_report(source_path, target_path, join_column, diff_result, clusters) -> str:
+def _render_report(source_path, target_path, join_column, diff_result, clusters, explanations: dict[str, ClusterExplanation] | None = None) -> str:
+    explanations = explanations or {}
     lines = [
         "# wherefore comparison report",
         "",
@@ -178,13 +219,24 @@ def _render_report(source_path, target_path, join_column, diff_result, clusters)
         f"- Target rows: {diff_result.target_row_count}",
         f"- Matched rows: {diff_result.matched_row_count}",
         "",
-        "> **Note:** this report shows statistical findings only. The AI",
-        "> reasoning layer that writes plain-English causal explanations",
-        "> isn't built yet -- see the project README for current status.",
-        "> What you see below is what was deterministically measured, not",
-        "> an explanation of why it happened.",
-        "",
     ]
+
+    if explanations:
+        lines += [
+            "> **Note:** sections marked **AI explanation** below were generated",
+            "> by calling the real Claude API (`--explain` was passed). Statistical",
+            "> detail is shown alongside each one so you can verify the claim",
+            "> against the actual evidence it was reasoned from.",
+            "",
+        ]
+    else:
+        lines += [
+            "> **Note:** this report shows statistical findings only. Pass",
+            "> `--explain` to additionally generate a plain-English causal",
+            "> narrative for each cluster via the Claude API (requires",
+            "> `ANTHROPIC_API_KEY` and makes real, billed API calls).",
+            "",
+        ]
 
     if diff_result.source_only_keys:
         lines.append(f"## Rows only in source ({len(diff_result.source_only_keys)})")
@@ -217,6 +269,13 @@ def _render_report(source_path, target_path, join_column, diff_result, clusters)
         lines.append(f"### `{cluster.column}` -- {len(cluster.mismatches)} mismatched row(s)")
         lines.append("")
 
+        explanation = explanations.get(cluster.column)
+        if explanation is not None:
+            lines.append(f"**AI explanation** (confidence: {explanation.confidence:.2f}):")
+            lines.append("")
+            lines.append(explanation.narrative)
+            lines.append("")
+
         if cluster.is_unrecognized:
             lines.append("No known failure pattern's statistical signature matched this cluster.")
         else:
@@ -229,16 +288,21 @@ def _render_report(source_path, target_path, join_column, diff_result, clusters)
 
         lines.append("Example rows:")
         lines.append("")
-        for m in cluster.mismatches[:5]:
-            lines.append(f"- `{m.key}`: `{m.source_value}` -> `{m.target_value}`")
-        if len(cluster.mismatches) > 5:
-            lines.append(f"- ... and {len(cluster.mismatches) - 5} more")
+        if explanation is not None and explanation.cited_rows:
+            for row in explanation.cited_rows:
+                lines.append(f"- `{row.key}`: `{row.source_value}` -> `{row.target_value}` *(cited by AI)*")
+        else:
+            for m in cluster.mismatches[:5]:
+                lines.append(f"- `{m.key}`: `{m.source_value}` -> `{m.target_value}`")
+            if len(cluster.mismatches) > 5:
+                lines.append(f"- ... and {len(cluster.mismatches) - 5} more")
         lines.append("")
 
     return "\n".join(lines)
 
 
-def _print_summary(diff_result, clusters, output_path) -> None:
+def _print_summary(diff_result, clusters, output_path, explanations: dict[str, ClusterExplanation] | None = None) -> None:
+    explanations = explanations or {}
     typer.echo(
         f"Compared {diff_result.source_row_count} source rows against "
         f"{diff_result.target_row_count} target rows."
@@ -264,6 +328,9 @@ def _print_summary(diff_result, clusters, output_path) -> None:
                         f"matches '{match.pattern_id}' (confidence {match.confidence:.2f})",
                         fg=typer.colors.CYAN,
                     )
+            explanation = explanations.get(cluster.column)
+            if explanation is not None:
+                typer.secho(f"    AI: {explanation.narrative}", fg=typer.colors.MAGENTA)
 
     typer.secho(f"\nFull report written to {output_path}", fg=typer.colors.GREEN)
 

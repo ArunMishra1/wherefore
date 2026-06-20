@@ -151,18 +151,51 @@ leaking verbatim into the system prompt sent to the model (fixed by
 stripping it before parsing), and a "1 more rows not shown" grammar
 bug when exactly one row was truncated from the example list.
 
-**Honest status: NOT YET VERIFIED AGAINST THE LIVE API.** Everything
-above is tested via a FakeProvider (tests/test_reasoning/test_explain.py)
-that returns canned JSON -- this validates prompt construction, schema
-validation, and error handling deterministically, but says nothing
-about whether real Claude responses are actually GOOD explanations,
-or whether the forced tool-use call works exactly as designed against
-the real API. This needs a real ANTHROPIC_API_KEY to verify -- next
-step once a key is available: run explain() against all three real
-patterns' fixtures, read the actual narratives, and iterate the prompt
-if needed (as cluster_explanation_v2.md, per the versioning convention).
+**LIVE-VERIFIED AGAINST THE REAL API.** The user ran
+`scripts/test_explain_live.py` against real fixtures from all three
+patterns plus a genuinely random/unrecognized case. Results, read in
+full:
 
-127 tests passing.
+- `timezone_shift`: correctly identified the constant +5h offset,
+  used the fact that the offset was IDENTICAL across summer and
+  winter months to specifically rule out DST as the cause (a real
+  causal inference, not a restatement of the statistic), and proposed
+  a specific plausible mechanism (UTC timestamps misread as a local
+  timezone during migration).
+- `truncation`: noticed that non-ASCII names (e.g. 'Søren Brown')
+  truncated at fewer visible characters than ASCII names, and used
+  that to correctly refine "8-character limit" to "8-*byte* limit" --
+  an inference neither the corruptor nor the signature function told
+  it directly; it was read off the actual cited values.
+- `enum_drift`: correctly identified the case-normalization recode,
+  offered two plausible mechanisms (ETL transform vs. DB-level
+  normalization) rather than overclaiming one, and flagged the real
+  downstream risk (case-sensitive comparisons breaking).
+- Genuinely unrecognized case (random garbage values): correctly
+  refused to match ANY known pattern, explicitly reasoned through why
+  enum_drift specifically didn't fit (the same source value mapped to
+  DIFFERENT targets on different rows -- breaking the "consistent
+  mapping" requirement), and proposed real alternative hypotheses (bad
+  join, mis-wired column binding) instead of forcing a guess.
+
+No prompt changes were made after this first real test -- the
+v1 prompt template held up well across all four cases. Resisting the
+urge to over-tune the prompt based on 4 examples; the eval harness
+(once built) is the right tool for systematic prompt iteration, not
+hand-picking a few good results and declaring victory.
+
+The reasoning layer is now wired into the CLI behind an explicit
+`--explain` flag -- off by default (so the tool stays free/key-free
+for anyone trying it without committing to API cost), fails fast with
+a clear message if `--explain` is passed without `ANTHROPIC_API_KEY`
+set (checked before any diffing/clustering work, not partway through),
+and degrades gracefully per-cluster if a single explain() call fails
+(warns and continues, rather than crashing the whole run). The report
+shows the AI narrative ALONGSIDE the statistical evidence, not instead
+of it, by design -- a reader can verify the claim against the actual
+cited rows rather than trusting it blindly.
+
+131 tests passing.
 
 ## Future, deliberately deferred (not now)
 
