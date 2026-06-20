@@ -145,7 +145,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **116 passed**). It's
+dependencies, and runs the test suite (should show **117 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
 
 After the first run, activate the environment in new shells with:

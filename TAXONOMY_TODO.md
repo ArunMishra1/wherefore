@@ -114,7 +114,26 @@ The full pipeline (load real files -> resolve keys -> diff -> cluster
 -> render report) now runs end-to-end via the actual CLI command for
 all three patterns, verified against real files on disk.
 
-116 tests passing.
+A real CI-only bug was caught and fixed after the first GitHub Actions
+run: `test_financial_datetime_columns_have_second_precision_not_nanosecond_noise`
+passed locally but failed on a fresh CI install across Python
+3.10/3.11/3.12. Root cause: `_gen_datetime` relied on
+`pd.to_datetime(raw_seconds, unit="s")`'s DEFAULT resolution inference
+to produce `datetime64[s]`, but that default behavior changed across
+pandas versions (confirmed via pandas-dev/pandas#55901 and related
+upstream issues) -- pandas 3.0.3 (installed locally) infers `[s]` for
+this call, while an earlier pandas 2.x (resolved fresh on CI, since
+`pyproject.toml`'s `pandas>=2.0` floor permitted it) returns `[ns]`
+instead. Fixed by explicitly forcing `.astype("datetime64[s]")` rather
+than depending on inferred default behavior, plus tightening the
+floor to `pandas>=2.2` as a secondary layer. A dedicated regression
+test (`test_datetime_resolution_is_explicit_not_version_dependent`)
+locks this in. The broader lesson: anything a test asserts a SPECIFIC
+dtype/resolution on is a candidate for this exact failure mode if it
+relies on a library's default inference rather than an explicit cast
+-- worth a quick audit if another resolution-sensitive bug surfaces.
+
+117 tests passing.
 
 ## Future, deliberately deferred (not now)
 

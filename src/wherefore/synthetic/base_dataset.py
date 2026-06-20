@@ -110,11 +110,26 @@ def _gen_datetime(
     timestamps like '12:06:48.702750148', which no real-world system
     actually emits and would make every fixture look obviously
     synthetic rather than realistic.
+
+    Explicitly forces datetime64[s] resolution via .astype() rather
+    than relying on pd.to_datetime(unit="s")'s default inference --
+    confirmed by direct testing that this default behavior is NOT
+    stable across pandas versions: pandas 3.0.3 infers [s] from
+    second-precision input, but this is a relatively recent inference
+    behavior (see pandas-dev/pandas#55901 and related issues) -- an
+    older pandas 2.x install, which our `pandas>=2.0` floor in
+    pyproject.toml still permits, can return [ns] for the exact same
+    call. This caused a real CI failure: the test asserting
+    datetime64[s] passed locally (pandas 3.0.3 installed) and failed
+    in a fresh CI install (an earlier pandas 2.x resolved instead).
+    .astype("datetime64[s]") makes the resulting dtype an explicit
+    guarantee of this function, not an inference side-effect that
+    drifts with whichever pandas version happens to be installed.
     """
     start_ts = pd.Timestamp(start).value // 10**9  # convert to whole seconds
     end_ts = pd.Timestamp(end).value // 10**9
     raw_seconds = rng.integers(start_ts, end_ts, size=n_rows)
-    return pd.to_datetime(raw_seconds, unit="s")
+    return pd.to_datetime(raw_seconds, unit="s").astype("datetime64[s]")
 
 
 def _gen_date(n_rows: int, rng: np.random.Generator, start: str, end: str) -> np.ndarray:

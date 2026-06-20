@@ -51,12 +51,43 @@ def test_financial_datetime_columns_have_second_precision_not_nanosecond_noise()
     Regression test for the nanosecond-precision bug: raw
     rng.integers() over .value produced timestamps like
     '12:06:48.702750148', which doesn't look like real-world data.
+
+    This assertion (dtype == "datetime64[s]") is itself the subject of
+    a SECOND regression below -- this one passing depends on
+    _gen_datetime explicitly forcing [s] resolution via .astype()
+    rather than relying on pd.to_datetime's version-dependent default
+    inference. See test_datetime_resolution_is_explicit_not_version_dependent.
     """
     df = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=20, seed=1)
     assert df["opened_at"].dtype == "datetime64[s]"
     # Every timestamp's sub-second component must be exactly zero.
     assert (df["opened_at"].dt.microsecond == 0).all()
     assert (df["opened_at"].dt.nanosecond == 0).all()
+
+
+def test_datetime_resolution_is_explicit_not_version_dependent():
+    """
+    Regression test for a real CI failure: this exact assertion passed
+    locally (pandas 3.0.3 was installed, where pd.to_datetime(unit="s")
+    happens to infer [s] resolution by default) but failed in a fresh
+    CI install, which resolved an earlier pandas 2.x where the same
+    call defaults to [ns]. Confirmed via pandas-dev/pandas#55901 and
+    related issues that this inference behavior changed across pandas
+    versions and is not something to depend on implicitly.
+
+    base_dataset.py's _gen_datetime now forces datetime64[s] explicitly
+    via .astype() rather than relying on inference, so this should hold
+    regardless of which pandas version (>=2.2, per the tightened floor
+    in pyproject.toml) actually gets installed.
+    """
+    df = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=20, seed=1)
+    for col in ("opened_at", "last_transaction_at"):
+        assert str(df[col].dtype) == "datetime64[s]", (
+            f"{col} resolved to {df[col].dtype}, not datetime64[s] -- "
+            "this should be impossible given the explicit .astype() call "
+            "in _gen_datetime; if this fails, something upstream of that "
+            "call changed."
+        )
 
 
 def test_nullable_float_column_keeps_numeric_dtype_not_object():
