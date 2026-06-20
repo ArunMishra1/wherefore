@@ -195,7 +195,50 @@ shows the AI narrative ALONGSIDE the statistical evidence, not instead
 of it, by design -- a reader can verify the claim against the actual
 cited rows rather than trusting it blindly.
 
-131 tests passing.
+## Eval harness (evals/fixtures/, evals/harness/)
+
+The eval harness is now real, per the project's original founding
+goal: don't just claim accuracy, prove it against labeled ground truth
+anyone can reproduce.
+
+`synthetic/ground_truth.py` defines `GroundTruth`/`InjectedCorruption`
+(JSON-serializable, round-trip tested) and `write_fixture()` /
+`load_fixture()` / `list_fixture_ids()`. `evals/fixtures/regenerate.py`
+is the deliberate, reviewed script that generates committed fixtures
+using the real corruptor functions -- run it, review the diff, commit
+it; nothing regenerates fixtures silently. Four fixtures are committed:
+one each for `timezone_shift`, `truncation`, `enum_drift`, and a
+genuinely unrecognized case (random, non-matching corruption, used to
+score the "honest_abstain" outcome).
+
+`evals/harness/scoring.py` implements the outcome classification from
+the original design notes -- true_positive, false_positive,
+honest_abstain, false_abstain, false_negative -- and per-pattern
+precision/recall, distinguishing "correctly said unrecognized" from
+"confidently named the wrong pattern," which a naive right/wrong
+scorer would conflate. Every metric in the mixed-batch test was
+verified by hand before being locked in, including the
+easy-to-get-wrong case where a single wrong prediction counts as a
+false_negative for the ACTUAL pattern and a false_positive for the
+WRONGLY PREDICTED pattern simultaneously.
+
+`evals/harness/run_eval.py` has two modes, mirroring the CLI's
+`--explain` precedent: a statistical mode (always runs, free, scores
+clustering's signature match against ground truth) and an opt-in
+`--llm` mode (real API calls, scores explain()'s matched_pattern_id
+instead) -- gated by the same up-front ANTHROPIC_API_KEY check as the
+CLI, so a missing key fails fast with a clean message instead of a
+raw traceback (caught and fixed during this build, mirroring the
+exact same UX bug pattern already fixed once in cli.py).
+
+**First real run, statistical mode, against all 4 committed fixtures:
+100% accuracy** (3 true positives, 1 honest abstain; precision=1.00,
+recall=1.00 for all three patterns). This is reproducible by anyone --
+`python3 -m evals.harness.run_eval` -- and is the first GENUINE
+accuracy claim this project can make, as opposed to "I read a few
+examples and they looked good."
+
+142 tests passing.
 
 ## Future, deliberately deferred (not now)
 

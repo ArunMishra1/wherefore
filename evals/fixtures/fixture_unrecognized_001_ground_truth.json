@@ -1,0 +1,9 @@
+{
+  "fixture_id": "fixture_unrecognized_001",
+  "source_file": "fixture_unrecognized_001_source.csv",
+  "target_file": "fixture_unrecognized_001_target.csv",
+  "injected_corruptions": [],
+  "generation_seed": 42,
+  "domain": "FINANCIAL_ACCOUNTS",
+  "join_column": "account_id"
+}

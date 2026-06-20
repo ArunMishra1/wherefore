@@ -1,0 +1,33 @@
+{
+  "fixture_id": "fixture_enum_drift_001",
+  "source_file": "fixture_enum_drift_001_source.csv",
+  "target_file": "fixture_enum_drift_001_target.csv",
+  "injected_corruptions": [
+    {
+      "pattern_id": "enum_drift",
+      "params": {
+        "value_mapping": {
+          "approved": "APPROVED",
+          "denied": "REJECTED"
+        },
+        "affected_fraction": 0.5
+      },
+      "affected_rows": [
+        0,
+        1,
+        4,
+        7,
+        14,
+        19,
+        25,
+        26,
+        27,
+        28
+      ],
+      "affected_column": "claim_status"
+    }
+  ],
+  "generation_seed": 42,
+  "domain": "HEALTHCARE_PATIENTS",
+  "join_column": "patient_id"
+}

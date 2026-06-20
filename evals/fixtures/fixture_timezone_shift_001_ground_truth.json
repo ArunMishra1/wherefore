@@ -1,0 +1,29 @@
+{
+  "fixture_id": "fixture_timezone_shift_001",
+  "source_file": "fixture_timezone_shift_001_source.csv",
+  "target_file": "fixture_timezone_shift_001_target.csv",
+  "injected_corruptions": [
+    {
+      "pattern_id": "timezone_shift",
+      "params": {
+        "offset_hours": 5.0,
+        "affected_fraction": 0.3
+      },
+      "affected_rows": [
+        8,
+        9,
+        12,
+        15,
+        17,
+        23,
+        24,
+        27,
+        29
+      ],
+      "affected_column": "opened_at"
+    }
+  ],
+  "generation_seed": 42,
+  "domain": "FINANCIAL_ACCOUNTS",
+  "join_column": "account_id"
+}
