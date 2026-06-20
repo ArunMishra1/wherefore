@@ -81,6 +81,13 @@ def compare(
         "cluster, in addition to the statistical detail. Requires ANTHROPIC_API_KEY to be "
         "set. Makes real network calls and incurs real API cost -- off by default.",
     ),
+    no_redact: bool = typer.Option(
+        False,
+        "--no-redact",
+        help="Disable automatic redaction of common sensitive patterns (emails, SSNs, credit "
+        "card numbers, phone numbers) before sending values to the Claude API with --explain. "
+        "Redaction is ON by default -- only disable this if you've already vetted your data.",
+    ),
 ) -> None:
     """
     Compare two datasets and show what's different, grouped by pattern
@@ -129,18 +136,28 @@ def compare(
     clusters = cluster_mismatches(diff_result, confidence_threshold=confidence_threshold)
 
     explanations: dict[str, ClusterExplanation] = {}
+    all_redaction_categories: set[str] = set()
     if explain_flag and clusters:
         taxonomy_menu = build_llm_taxonomy_menu()
         typer.echo(f"Calling Claude for {len(clusters)} cluster(s)...")
         for cluster in clusters:
             try:
-                explanations[cluster.column] = explain(cluster, taxonomy_menu)
+                explanation, categories = explain(cluster, taxonomy_menu, redact=not no_redact)
+                explanations[cluster.column] = explanation
+                all_redaction_categories.update(categories)
             except Exception as e:
                 typer.secho(
                     f"Warning: explain() failed for column {cluster.column!r}: {e}",
                     fg=typer.colors.YELLOW,
                     err=True,
                 )
+
+        if all_redaction_categories:
+            typer.secho(
+                f"Redacted before sending to Claude: {', '.join(sorted(all_redaction_categories))} "
+                f"-- pass --no-redact to disable this.",
+                fg=typer.colors.YELLOW,
+            )
 
     report = _render_report(source, target, join_column, diff_result, clusters, explanations)
     Path(output).write_text(report)

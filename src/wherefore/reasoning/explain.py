@@ -142,26 +142,66 @@ def build_prompt(cluster: Cluster, taxonomy_menu: str) -> tuple[str, str]:
     return system_prompt, user_prompt
 
 
-def explain(cluster: Cluster, taxonomy_menu: str, provider: Provider | None = None) -> ClusterExplanation:
+def explain(
+    cluster: Cluster,
+    taxonomy_menu: str,
+    provider: Provider | None = None,
+    redact: bool = True,
+) -> tuple[ClusterExplanation, list[str]]:
     """
     Takes a statistically-analyzed cluster and produces a plain-English
     explanation. `provider` defaults to the Claude provider if not
     given (lazy import to avoid requiring the anthropic SDK / API key
     for callers who only need build_prompt or testing with a fake
     provider).
+
+    `redact` defaults to True: before building the prompt, the
+    cluster's mismatch values are passed through
+    reasoning.redaction.redact_mismatch_rows, which masks common
+    structured sensitive patterns (emails, SSNs, credit card numbers,
+    phone numbers) -- see redaction.py's module docstring for the
+    honest scope of what this does and doesn't catch. This is
+    deliberately secure-by-default: redaction happens unless a caller
+    explicitly passes redact=False, not the other way around, since
+    opt-in redaction tends to mean most people never enable it.
+
+    Returns (explanation, redaction_categories_found) -- NOT bundled
+    into ClusterExplanation itself, since that schema is also what
+    Claude is FORCED to populate via tool-use (see providers/claude.py);
+    redaction metadata describes the INPUT, not something the model
+    should be asked to report about itself. redaction_categories_found
+    is [] when redact=False or when nothing matched any pattern --
+    callers (e.g. cli.py) use this to tell the user what was masked.
     """
+    if redact:
+        from wherefore.reasoning.redaction import redact_mismatch_rows
+
+        redacted_mismatches, categories_found = redact_mismatch_rows(cluster.mismatches)
+        # Build a redacted COPY of the cluster for prompt construction
+        # only -- never mutate the original, since callers (e.g. the
+        # CLI's report renderer) still need the real, unredacted
+        # mismatches for the statistical-evidence section of the report.
+        from dataclasses import replace
+
+        cluster_for_prompt = replace(cluster, mismatches=redacted_mismatches)
+    else:
+        cluster_for_prompt = cluster
+        categories_found = []
+
     if provider is None:
         from wherefore.reasoning.providers.claude import ClaudeProvider
 
         provider = ClaudeProvider()
 
-    system_prompt, user_prompt = build_prompt(cluster, taxonomy_menu)
+    system_prompt, user_prompt = build_prompt(cluster_for_prompt, taxonomy_menu)
     raw_json = provider.complete(system_prompt, user_prompt)
 
     try:
-        return ClusterExplanation.model_validate_json(raw_json)
+        explanation = ClusterExplanation.model_validate_json(raw_json)
     except (ValueError, json.JSONDecodeError) as e:
         raise ValueError(
             f"Provider returned a response that doesn't match ClusterExplanation: {e}\n"
             f"Raw response: {raw_json[:500]}"
         ) from e
+
+    return explanation, categories_found

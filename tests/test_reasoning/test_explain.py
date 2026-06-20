@@ -97,7 +97,7 @@ def test_explain_returns_valid_cluster_explanation(real_cluster):
         ],
     })
     provider = FakeProvider(fake_response)
-    result = explain(real_cluster, build_llm_taxonomy_menu(), provider=provider)
+    result, redaction_categories = explain(real_cluster, build_llm_taxonomy_menu(), provider=provider)
 
     assert isinstance(result, ClusterExplanation)
     assert result.matched_pattern_id == "timezone_shift"
@@ -105,6 +105,7 @@ def test_explain_returns_valid_cluster_explanation(real_cluster):
     assert len(result.cited_rows) == 1
     assert provider.last_system_prompt is not None
     assert provider.last_user_prompt is not None
+    assert redaction_categories == []  # this fixture has no sensitive-looking values
 
 
 def test_explain_accepts_null_matched_pattern_for_unrecognized():
@@ -118,7 +119,7 @@ def test_explain_accepts_null_matched_pattern_for_unrecognized():
         MismatchRow(key={"id": 1}, column="mystery", source_value="a", target_value="z"),
     ], candidate_patterns=[])
     provider = FakeProvider(fake_response)
-    result = explain(cluster, "no patterns", provider=provider)
+    result, _ = explain(cluster, "no patterns", provider=provider)
     assert result.matched_pattern_id is None
 
 
@@ -143,3 +144,91 @@ def test_cluster_explanation_rejects_empty_narrative():
 def test_cluster_explanation_rejects_out_of_range_confidence():
     with pytest.raises(Exception):
         ClusterExplanation(matched_pattern_id="x", confidence=1.5, narrative="valid text", cited_rows=[])
+
+
+def test_explain_redacts_sensitive_values_before_building_prompt_by_default():
+    """
+    The core integration test: a cluster containing an email address
+    must NOT have that raw email appear anywhere in the prompt sent to
+    the provider -- only the redacted placeholder should. This is the
+    real guarantee redaction exists to provide; testing it at the
+    explain() level (not just redaction.py in isolation) confirms the
+    wiring actually works end-to-end, not just that the function exists.
+    """
+    cluster = Cluster(
+        column="contact_email",
+        mismatches=[
+            MismatchRow(key={"id": 1}, column="contact_email", source_value="old@example.com", target_value="new@example.com"),
+        ],
+        candidate_patterns=[],
+    )
+    fake_response = json.dumps({
+        "matched_pattern_id": None,
+        "confidence": 0.5,
+        "narrative": "Email addresses changed.",
+        "cited_rows": [],
+    })
+    provider = FakeProvider(fake_response)
+    explanation, categories = explain(cluster, "no patterns", provider=provider)
+
+    assert "old@example.com" not in provider.last_user_prompt
+    assert "new@example.com" not in provider.last_user_prompt
+    assert "[REDACTED:email]" in provider.last_user_prompt
+    assert categories == ["email"]
+
+
+def test_explain_with_redact_false_sends_raw_values():
+    """
+    The explicit opt-out: redact=False sends raw values, for a caller
+    who has already vetted their data and wants them in the prompt.
+    """
+    cluster = Cluster(
+        column="contact_email",
+        mismatches=[
+            MismatchRow(key={"id": 1}, column="contact_email", source_value="old@example.com", target_value="new@example.com"),
+        ],
+        candidate_patterns=[],
+    )
+    fake_response = json.dumps({
+        "matched_pattern_id": None,
+        "confidence": 0.5,
+        "narrative": "Email addresses changed.",
+        "cited_rows": [],
+    })
+    provider = FakeProvider(fake_response)
+    explanation, categories = explain(cluster, "no patterns", provider=provider, redact=False)
+
+    assert "old@example.com" in provider.last_user_prompt
+    assert categories == []  # redaction never ran, so nothing to report
+
+
+def test_explain_redaction_does_not_mutate_the_original_cluster():
+    """
+    The redacted version is used ONLY for prompt construction --
+    callers (e.g. cli.py's report renderer) still need the real,
+    unredacted cluster for the statistical-evidence section of the
+    report, so the original cluster object must be untouched.
+    """
+    cluster = Cluster(
+        column="contact_email",
+        mismatches=[
+            MismatchRow(key={"id": 1}, column="contact_email", source_value="old@example.com", target_value="new@example.com"),
+        ],
+        candidate_patterns=[],
+    )
+    fake_response = json.dumps({
+        "matched_pattern_id": None, "confidence": 0.5, "narrative": "x", "cited_rows": [],
+    })
+    provider = FakeProvider(fake_response)
+    explain(cluster, "no patterns", provider=provider)
+
+    assert cluster.mismatches[0].source_value == "old@example.com"  # untouched
+
+
+def test_explain_with_no_sensitive_data_reports_empty_categories(real_cluster):
+    fake_response = json.dumps({
+        "matched_pattern_id": "timezone_shift", "confidence": 0.9, "narrative": "x", "cited_rows": [],
+    })
+    provider = FakeProvider(fake_response)
+    _, categories = explain(real_cluster, build_llm_taxonomy_menu(), provider=provider)
+    assert categories == []

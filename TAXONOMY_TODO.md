@@ -517,3 +517,61 @@ Agreed design for the database round, not yet built:
   database is a more serious mistake than a wrong key on a CSV.
 - Planned to start with SQLite (no server setup needed, fully testable
   in this environment) before Postgres/MySQL, once the pattern's proven.
+
+## Redaction layer: data safety before any new connector
+
+Before building cloud-storage or database connectivity (the multi-
+source roadmap above), a deliberate decision was made to build the
+data-safety layer first: every new source type widens the gap between
+"data on the user's machine" and "data that could reach the Claude
+API" -- direct DB/S3 access removes the accidental privacy buffer that
+"I already exported a sanitized CSV" provided today. Better to build
+the safety layer once, now, than retrofit it after several connectors
+already exist.
+
+`reasoning/redaction.py` is real and tested: pattern-based detection
+for emails, SSNs, credit card numbers, and US phone numbers, checked
+directly against this project's OWN data formats (ACCT-100042,
+PT-500003, ISO date strings) before being trusted -- none false-positive.
+
+A real bug was caught and fixed during development: the phone regex's
+`\b` word boundary doesn't transition correctly before a literal `(`
+(non-word characters don't trigger `\b` the way the original pattern
+assumed), so `"(555) 123-4567"` redacted to `"([REDACTED:phone]"` --  a
+dangling, unbalanced parenthesis left in the output. Fixed by making
+the optional `(` an explicit part of the matched span rather than
+relying on `\b` to handle it; confirmed via a regression test plus a
+sentence-embedded case ("Call me at (555) 123-4567 anytime").
+
+A real, honest limitation is documented rather than hidden: a 13-16
+digit numeric string is indistinguishable from a credit card number
+BY SHAPE ALONE, so a long internal record/account number in that exact
+digit range will be falsely flagged. There's no way to tell "16-digit
+account number" from "16-digit card number" without context this
+module doesn't have -- accepted as the honest cost of pattern-based
+detection on bare digit sequences, tested explicitly rather than
+swept under the rug.
+
+**Integration design, worth understanding:** `explain()`'s signature
+changed from returning `ClusterExplanation` to returning
+`(ClusterExplanation, redaction_categories_found)`. Redaction metadata
+is deliberately NOT a field on `ClusterExplanation` itself, even
+though that would have been simpler to wire -- `ClusterExplanation`
+is also the exact schema Claude is FORCED to populate via tool-use
+(see providers/claude.py), and redaction describes a property of the
+INPUT, not something the model should be asked to report about
+itself. Keeping it as a separate return value preserves that
+boundary. `redact=True` is the default on `explain()` itself (not
+just at the CLI layer), so any future caller -- not only cli.py --
+gets secure-by-default behavior without having to remember to ask for it.
+
+Wired into the CLI as `--no-redact` (off only via explicit opt-out),
+with redacted categories surfaced to the user in both the terminal
+output and implicitly available for the report -- never silent, so a
+false positive (see the digit-string limitation above) is at least
+noticeable rather than hidden. `SECURITY.md` now has a full section on
+exactly what data reaches Claude and what redaction does and doesn't
+catch, written to avoid overclaiming "PII protection" when the real
+claim is narrower and more honest: structured-pattern detection.
+
+222 tests passing.

@@ -63,6 +63,17 @@ What's real today:
   of approximating its size — see
   [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the full account of
   both.
+- **Data sent to Claude is redacted by default.** Before any cell
+  value reaches `--explain`'s prompt, it passes through a pattern-based
+  redaction layer that masks emails, SSNs, credit card numbers, and
+  phone numbers — secure-by-default, not opt-in, since opt-in
+  redaction tends to mean most people never enable it. Disable with
+  `--no-redact` if you've already vetted your data. This is honestly
+  scoped: it catches *structurally recognizable* patterns, not a
+  general PII detector — see [`SECURITY.md`](./SECURITY.md) for exactly
+  what it does and doesn't catch, including a documented false-positive
+  case (long numeric IDs can look like credit card numbers) found
+  during testing.
 - The AI reasoning layer is built and **verified against the real
   Claude API**: a `ClusterExplanation` schema, a swappable `Provider`
   interface, and a real Claude integration that uses *forced* tool-use
@@ -229,7 +240,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **199 passed**). It's
+dependencies, and runs the test suite (should show **222 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
 
 **No API key needed for this.** The test suite covers the AI reasoning
@@ -355,6 +366,8 @@ wherefore compare SOURCE TARGET [OPTIONS]
   --confidence-threshold FLOAT Minimum confidence to count as a pattern match (default: 0.9).
   --explain                    Generate plain-English AI explanations via the Claude API.
                                 Requires ANTHROPIC_API_KEY. Makes real, billed API calls. Off by default.
+  --no-redact                  Disable automatic redaction of emails/SSNs/cards/phones before
+                                sending data to Claude with --explain. Redaction is ON by default.
 ```
 </details>
 

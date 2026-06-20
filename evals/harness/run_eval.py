@@ -142,7 +142,7 @@ def run_llm_eval(fixtures_dir: Path = FIXTURES_DIR) -> list[ScoredCase]:
         if not target_clusters:
             predicted_pattern_id = None
         else:
-            explanation = explain(target_clusters[0], taxonomy_menu)
+            explanation, _redaction_categories = explain(target_clusters[0], taxonomy_menu)
             predicted_pattern_id = explanation.matched_pattern_id
 
         outcome = score_pattern_match(actual_pattern_id, predicted_pattern_id)

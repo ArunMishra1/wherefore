@@ -223,8 +223,8 @@ def test_explain_flag_with_fake_provider_populates_report_and_terminal_output(
         cited_rows=[],
     )
 
-    def _fake_explain(cluster, taxonomy_menu, provider=None):
-        return fake_explanation
+    def _fake_explain(cluster, taxonomy_menu, provider=None, redact=True):
+        return fake_explanation, []
 
     monkeypatch.setattr(cli_module, "explain", _fake_explain)
 
@@ -251,7 +251,7 @@ def test_explain_flag_handles_per_cluster_failure_gracefully(timezone_shift_csv_
     """
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-this-test-only")
 
-    def _failing_explain(cluster, taxonomy_menu, provider=None):
+    def _failing_explain(cluster, taxonomy_menu, provider=None, redact=True):
         raise RuntimeError("simulated API failure")
 
     monkeypatch.setattr(cli_module, "explain", _failing_explain)
@@ -267,3 +267,61 @@ def test_explain_flag_handles_per_cluster_failure_gracefully(timezone_shift_csv_
     assert "Warning" in result.output
     report_text = output_path.read_text()
     assert "timezone_shift" in report_text  # statistical detail still present
+
+
+def test_explain_flag_reports_redaction_categories_to_user(timezone_shift_csv_pair, monkeypatch):
+    """
+    Confirms the CLI surfaces WHAT was redacted, not just that
+    redaction happened silently -- a user should be able to see "an
+    email was masked before this was sent to Claude," not be left
+    wondering whether their data went out raw.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-this-test-only")
+
+    fake_explanation = ClusterExplanation(
+        matched_pattern_id="timezone_shift", confidence=0.9, narrative="x", cited_rows=[],
+    )
+
+    def _fake_explain_with_redaction(cluster, taxonomy_menu, provider=None, redact=True):
+        categories = ["email"] if redact else []
+        return fake_explanation, categories
+
+    monkeypatch.setattr(cli_module, "explain", _fake_explain_with_redaction)
+
+    source_path, target_path = timezone_shift_csv_pair
+    output_path = source_path.parent / "report.md"
+
+    result = runner.invoke(
+        app, ["compare", str(source_path), str(target_path), "--explain", "--output", str(output_path)]
+    )
+    assert "Redacted before sending to Claude: email" in result.output
+    assert "--no-redact" in result.output
+
+
+def test_no_redact_flag_is_passed_through_to_explain(timezone_shift_csv_pair, monkeypatch):
+    """
+    Confirms --no-redact actually reaches explain() as redact=False,
+    not just that the flag exists on the CLI -- the wiring matters,
+    not just the surface.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-this-test-only")
+
+    fake_explanation = ClusterExplanation(
+        matched_pattern_id="timezone_shift", confidence=0.9, narrative="x", cited_rows=[],
+    )
+    received_redact_values = []
+
+    def _capturing_explain(cluster, taxonomy_menu, provider=None, redact=True):
+        received_redact_values.append(redact)
+        return fake_explanation, []
+
+    monkeypatch.setattr(cli_module, "explain", _capturing_explain)
+
+    source_path, target_path = timezone_shift_csv_pair
+    output_path = source_path.parent / "report.md"
+
+    runner.invoke(
+        app,
+        ["compare", str(source_path), str(target_path), "--explain", "--no-redact", "--output", str(output_path)],
+    )
+    assert received_redact_values == [False]
