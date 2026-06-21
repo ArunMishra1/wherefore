@@ -74,8 +74,42 @@ needed; `wherefore` finds one. If it picks wrong, or you have many
 table pairs to check at once (a real migration is dozens of tables,
 not one), see [usage details](#usage) below.
 
-**Don't have a Parquet or Excel file handy?** Make one from the CSVs
-above in two lines, run inside the same activated `.venv` from
+**CSV — write directly**
+
+```bash
+echo "id,name,updated_at
+1,Alice,2024-01-15 09:00:00" > old.csv
+
+# CSV — just write two files with a shared key column
+cat > old.csv << 'EOF'
+id,name,updated_at
+1,Alice,2024-01-15 09:00:00
+2,Bob,2024-01-16 09:00:00
+EOF
+
+cat > new.csv << 'EOF'
+id,name,updated_at
+1,Alice,2024-01-15 14:00:00
+2,Bob,2024-01-16 14:00:00
+EOF
+
+wherefore compare old.csv new.csv
+
+# Parquet — same data, just save as .parquet (e.g. via pandas/Excel export, or:)
+python3 -c "import pandas as pd; pd.read_csv('old.csv').to_parquet('old.parquet')"
+python3 -c "import pandas as pd; pd.read_csv('new.csv').to_parquet('new.parquet')"
+wherefore compare old.parquet new.parquet
+
+# Excel — open old.csv/new.csv in Excel/Numbers/Google Sheets, "Save As" .xlsx
+wherefore compare old.xlsx new.xlsx
+
+# Mix formats freely
+wherefore compare old.csv new.parquet
+```
+
+**Don't have a Parquet or Excel file handy?**
+
+Make one from the CSVs above in two lines, run inside the same activated `.venv` from
 `dev_setup.sh` (so `pandas`/`pyarrow` are already available) — note
 `parse_dates=[...]` on any datetime column, since Parquet and Excel
 store dates natively and pandas needs to know which column is one
@@ -380,6 +414,7 @@ wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
   --output-dir TEXT             Directory for one report per pair (default: reports).
   --key, --fuzzy-keys, --confidence-threshold, --explain, --no-redact   Same as `compare`, applied to every pair.
 ```
+
 </details>
 
 ## Contributing
