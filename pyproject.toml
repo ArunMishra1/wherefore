@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wherefore"
-version = "0.1.0"
+version = "0.2.0"
 description = "Explains WHY two datasets differ, in plain English, with eval-backed accuracy claims."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -51,10 +51,36 @@ dev = [
     "pytest>=8.0",
     "pytest-cov",
     "moto[s3]>=5.2",     # mocks real AWS S3 calls for testing loaders.py's S3 support, no real AWS account needed
+    "py-pglite>=0.5",    # runs a REAL PostgreSQL server (via PGlite, compiled to WASM, through a real npm-fetched
+                          # binary) for testing comparison/db.py's Postgres support against an actual server --
+                          # not mocked, the same standard the SQLite tests hold (real on-disk sqlite3 files).
+                          # Needs Node.js/npm available on PATH (confirmed working; npm fetches its own small
+                          # packages from the registry on first use, same trust boundary as any other dev dep).
+    "psycopg2-binary>=2.9",  # the actual Postgres driver tests connect through -- listed here too (not just in
+                              # the "db" extra) so `pip install -e ".[dev]"` alone is sufficient to run the full
+                              # test suite, matching how moto[s3] is listed in dev rather than relying on the
+                              # separate "s3" extra being installed too.
 ]
 s3 = [
     "boto3>=1.34",       # optional: only needed for s3:// paths in loaders.py. Install with: pip install wherefore[s3]
 ]
+db = [
+    "psycopg2-binary>=2.9",  # optional: only needed for postgresql:// connection strings in comparison/db.py.
+                              # REAL TRADEOFF, decided explicitly with the user after testing both options:
+                              # psycopg2's own docs say a published package "shouldn't use psycopg2-binary as
+                              # a module dependency" (risk: multiple packages bundling conflicting libpq
+                              # copies in one environment). Confirmed by direct testing, though, that plain
+                              # psycopg2 (source) FAILS to install in a clean environment without libpq-dev/
+                              # pg_config and a C compiler already present -- a real, immediate failure for
+                              # most users, not a theoretical one. wherefore is a single-purpose CLI, not a
+                              # multi-Postgres-dependency web app -- the library-conflict risk the official
+                              # warning targets barely applies here, while the install-failure risk is
+                              # near-certain on a typical machine. -binary wins on balance for THIS tool.
+                              # Install with: pip install wherefore[db]
+]
+# NOTE: no MySQL driver here yet -- comparison/db.py's MySQL paths all
+# raise NotImplementedError; a driver (e.g. PyMySQL) belongs in this
+# "db" extra once that backend is actually implemented, not before.
 
 [project.scripts]
 wherefore = "wherefore.cli:app"

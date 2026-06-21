@@ -652,3 +652,278 @@ def test_compare_with_s3_error_shows_clean_message_not_raw_traceback(monkeypatch
         )
         assert result.exit_code == 1
         assert "Error loading files" in result.output
+
+
+# --- Database connectivity (db:// sources) ---
+# Real end-to-end tests against real, on-disk SQLite files -- not
+# mocked connections -- the same standard the S3 tests above hold
+# (real moto-mocked AWS, never a stubbed boto3 client).
+
+
+def _make_sqlite_db(path, rows_with_mismatch_at=None):
+    """Creates a real SQLite file with an `accounts` table, optionally
+    injecting one balance mismatch at the given row index so a
+    comparison against an otherwise-identical sibling database finds
+    something real to report."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE accounts (account_id TEXT PRIMARY KEY, balance REAL)")
+    for i in range(10):
+        offset = 99.0 if i == rows_with_mismatch_at else 0.0
+        conn.execute("INSERT INTO accounts VALUES (?, ?)", (f"ACCT-{i}", 100.0 + i + offset))
+    conn.commit()
+    conn.close()
+
+
+def test_db_source_end_to_end_with_confirmed_primary_key(tmp_path, monkeypatch):
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_sqlite_db(src_db)
+    _make_sqlite_db(tgt_db, rows_with_mismatch_at=3)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "db://accounts",
+            "db://accounts",
+            "--source-conn-env",
+            "SOURCE_DB",
+            "--target-conn-env",
+            "TARGET_DB",
+            "--output",
+            str(tmp_path / "report.md"),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 0
+    assert "detected primary key 'account_id'" in result.output
+    assert "balance" in result.output
+
+
+def test_db_source_yes_flag_skips_interactive_prompt(tmp_path, monkeypatch):
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_sqlite_db(src_db)
+    _make_sqlite_db(tgt_db)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "db://accounts",
+            "db://accounts",
+            "--source-conn-env",
+            "SOURCE_DB",
+            "--target-conn-env",
+            "TARGET_DB",
+            "--output",
+            str(tmp_path / "report.md"),
+            "--yes",
+        ],
+        # No input provided at all -- if --yes didn't actually skip the
+        # prompt, this would hang/fail rather than silently pass,
+        # since CliRunner with no input behaves like closed stdin.
+    )
+    assert result.exit_code == 0
+    assert "proceeding without interactive confirmation" in result.output
+
+
+def test_db_source_declining_confirmation_aborts_cleanly(tmp_path, monkeypatch):
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_sqlite_db(src_db)
+    _make_sqlite_db(tgt_db)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "db://accounts",
+            "db://accounts",
+            "--source-conn-env",
+            "SOURCE_DB",
+            "--target-conn-env",
+            "TARGET_DB",
+            "--output",
+            str(tmp_path / "report.md"),
+        ],
+        input="n\n",
+    )
+    assert result.exit_code == 1
+    assert "Aborted" in result.output
+    assert not (tmp_path / "report.md").exists()
+
+
+def test_db_source_explicit_key_skips_confirmation_prompt_entirely(tmp_path, monkeypatch):
+    """
+    Passing --key explicitly should bypass primary-key detection and
+    confirmation entirely -- no prompt printed, no input needed at all
+    (confirmed by passing no `input=` and the call still succeeding,
+    which would hang/fail if a prompt were unexpectedly shown).
+    """
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_sqlite_db(src_db)
+    _make_sqlite_db(tgt_db)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "db://accounts",
+            "db://accounts",
+            "--source-conn-env",
+            "SOURCE_DB",
+            "--target-conn-env",
+            "TARGET_DB",
+            "--key",
+            "account_id",
+            "--output",
+            str(tmp_path / "report.md"),
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Proceed with this key?" not in result.output
+    assert "detected primary key" not in result.output
+
+
+def test_db_source_missing_conn_env_flag_gives_clear_error(tmp_path):
+    result = runner.invoke(
+        app,
+        ["compare", "db://accounts", str(tmp_path / "doesnt_matter.csv"), "--key", "id"],
+    )
+    assert result.exit_code == 1
+    assert "--source-conn-env" in result.output
+
+
+def test_db_source_unset_env_var_gives_clear_error(tmp_path, monkeypatch):
+    monkeypatch.delenv("DEFINITELY_NOT_SET", raising=False)
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "db://accounts",
+            str(tmp_path / "doesnt_matter.csv"),
+            "--source-conn-env",
+            "DEFINITELY_NOT_SET",
+            "--key",
+            "id",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "is not set" in result.output
+
+
+def test_db_source_no_primary_key_table_still_prompts(tmp_path, monkeypatch):
+    import sqlite3
+
+    db_path = tmp_path / "no_pk.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("CREATE TABLE widgets (a TEXT, b REAL)")
+    conn.execute("INSERT INTO widgets VALUES ('x', 1.0)")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("NOPK_DB", f"sqlite:///{db_path}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "db://widgets",
+            "db://widgets",
+            "--source-conn-env",
+            "NOPK_DB",
+            "--target-conn-env",
+            "NOPK_DB",
+            "--output",
+            str(tmp_path / "report.md"),
+        ],
+        input="y\n",
+    )
+    assert "no primary key found" in result.output
+
+
+def test_db_source_composite_primary_key_reports_clear_unsupported_error(tmp_path, monkeypatch):
+    """
+    A composite primary key is detected and shown, but using it
+    directly as a join key isn't supported yet (real, tracked future
+    work, not silently mishandled) -- confirms the user gets a clear
+    error after confirming, not a crash or a wrong comparison.
+    """
+    import sqlite3
+
+    db_path = tmp_path / "composite.sqlite"
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "CREATE TABLE regional (region TEXT, id TEXT, val REAL, PRIMARY KEY (region, id))"
+    )
+    conn.execute("INSERT INTO regional VALUES ('us', '1', 10.0)")
+    conn.commit()
+    conn.close()
+
+    monkeypatch.setenv("COMPOSITE_DB", f"sqlite:///{db_path}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "db://regional",
+            "db://regional",
+            "--source-conn-env",
+            "COMPOSITE_DB",
+            "--target-conn-env",
+            "COMPOSITE_DB",
+            "--output",
+            str(tmp_path / "report.md"),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 1
+    assert "composite" in result.output.lower()
+
+
+def test_db_source_mixed_with_file_source_works(tmp_path, monkeypatch):
+    """db:// on one side, a plain file on the other -- confirms the two
+    source types can genuinely be mixed in one comparison, which
+    matters for a real-world "comparing a database export against a
+    live table" scenario."""
+    db_path = tmp_path / "accounts.sqlite"
+    _make_sqlite_db(db_path)
+
+    csv_path = tmp_path / "accounts.csv"
+    csv_path.write_text(
+        "account_id,balance\n" + "\n".join(f"ACCT-{i},{100.0 + i}" for i in range(10)) + "\n"
+    )
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{db_path}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare",
+            "db://accounts",
+            str(csv_path),
+            "--source-conn-env",
+            "SOURCE_DB",
+            "--key",
+            "account_id",
+            "--output",
+            str(tmp_path / "report.md"),
+        ],
+    )
+    assert result.exit_code == 0

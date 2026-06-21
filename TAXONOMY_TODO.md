@@ -28,6 +28,9 @@ instead; come back here for the "why" behind any specific decision.
 - [dedup_failure: built](#dedup_failure-built-using-the-row-presence-extension-above)
 - [key_mismatch: built, with an architecture fork and a false positive](#key_mismatch-built-with-a-real-architecture-fork-and-a-real-false-positive-caught-mid-build)
 - [PyPI packaging: a real bug caught before shipping](#pypi-packaging-a-real-severe-bug-caught-before-it-could-ship)
+- [Database connectivity: SQLite built](#database-connectivity-sqlite-built-postgresmysql-deliberately-deferred)
+- [PostgreSQL: built and verified against a real server](#postgresql-built-and-verified-against-a-real-postgres-server-not-mocked)
+- [Documentation: ARCHITECTURE.md and troubleshooting.md](#documentation-architecturemd-and-troubleshootingmd-added)
 
 ---
 
@@ -569,6 +572,11 @@ Agreed design for the database round, not yet built:
 - Planned to start with SQLite (no server setup needed, fully testable
   in this environment) before Postgres/MySQL, once the pattern's proven.
 
+(Built later -- see "Database connectivity: SQLite built, Postgres/
+MySQL deliberately deferred" further down for what the real
+implementation needed versus what was planned here, including a real
+bug this plan didn't anticipate.)
+
 ## Redaction layer: data safety before any new connector
 
 Before building cloud-storage or database connectivity (the multi-
@@ -997,3 +1005,274 @@ to Homebrew's infrastructure from this environment). Both require the
 user's own PyPI account/local machine to confirm -- the dist artifacts
 and exact upload commands were handed off rather than guessed at as
 "done."
+
+(Both were later confirmed live by the user: PyPI publish succeeded
+and was verified with a real clean-venv `pip install wherefore`;
+Homebrew needed five real, distinct build-environment fixes across
+five attempts before a successful bottle, documented in the tap
+repo's own README, not here.)
+
+## Database connectivity: SQLite built, Postgres/MySQL deliberately deferred
+
+Per the roadmap's own stated plan: start with SQLite (no server,
+stdlib `sqlite3`, fully testable in this sandbox) before Postgres/
+MySQL, proving the `SourceSpec`-style abstraction works end-to-end
+first.
+
+**Architecture, confirmed against the real existing code before
+writing anything:** `loaders.py`'s `_is_s3_path` check-before-`Path()`
+discipline was the model to follow one layer up -- `db://table_name`
+is a CLI-only source syntax, checked in a new `_load_source` dispatch
+function in `cli.py` BEFORE `load_file()` ever sees the string, the
+same way `s3://` is checked before any path construction. `_run_comparison`
+itself needed ZERO changes -- confirmed by reading it first: it already
+only takes plain DataFrames, completely agnostic to source. New module:
+`comparison/db.py` -- `DatabaseBackend` enum, `ConnectionInfo`
+dataclass (with a password-redacting `__repr__`, confirmed this
+matters since a leaked credential in a traceback/log is exactly the
+failure mode the whole env-var design exists to prevent), and SQLite-
+specific `connect`/`list_columns`/`detect_primary_key`/`query_table`.
+Postgres/MySQL schemes are recognized and parsed (generic-from-day-one,
+per explicit discussion with the user) but `connect`/etc. raise a
+clear `NotImplementedError` for them, not a silent wrong-looking
+success.
+
+**Real bug caught and fixed mid-build: `urlparse` does not match
+SQLAlchemy's own documented SQLite connection-string convention.**
+The de facto standard (confirmed via SQLAlchemy's own docs) is
+`sqlite:///relative/path` (3 slashes) vs `sqlite:////absolute/path`
+(4 slashes, the 4th being the path's own leading slash). The first
+draft of this module used `urllib.parse.urlparse(...).path` to extract
+the path, on the assumption that the empty-netloc/path split would
+"just work" the same way it does for `s3://`. Confirmed by direct
+testing that it does NOT: for the 4-slash absolute case, `urlparse`
+returns a path with a DOUBLED leading slash (`//absolute/path`, not
+`/absolute/path`); for the 3-slash relative case, it returns a path
+with a SPURIOUS leading slash (`/relative/path`, not the intended
+`relative/path`) -- neither is usable as-is, and the mismatch is real,
+not a corner case (it broke the very first absolute-path test written
+for this module). Fixed by abandoning `urlparse` for the SQLite path
+specifically and doing a literal string-prefix strip of exactly
+`"sqlite:///"` (3 slashes) -- whatever remains IS the path exactly as
+the user intended it, verified against all three real shapes
+(relative, absolute, and a path with no leading slash at all).
+Non-SQLite schemes (Postgres/MySQL) don't have this ambiguity --
+they have a real host/port/database structure `urlparse` parses
+correctly -- so they're unaffected and still go through `urlparse`
+normally.
+
+**Real bugs avoided, confirmed by direct testing before assuming
+anything:**
+- A literal `"NULL"` string vs. a genuine SQL `NULL` -- the same
+  distinction `load_csv` needs `keep_default_na=False`/`na_values=[""]`
+  to preserve for CSV -- comes for FREE from `pd.read_sql` against
+  SQLite, confirmed directly: SQLite's native per-value typing already
+  keeps them distinct. No special-casing needed in `query_table`.
+- SQLite has no native datetime type (everything is TEXT/INTEGER/REAL)
+  -- confirmed directly that a datetime column round-trips through
+  SQLite as plain TEXT, the IDENTICAL problem CSV has. `query_table`
+  reuses `loaders.py`'s `_try_parse_datetime_columns` directly (not a
+  reimplementation) for exactly this reason -- it already correctly
+  parses real dates while preserving a literal sentinel string
+  untouched, which is precisely what a SQLite-sourced DataFrame needs
+  too. Confirmed this reuse works end-to-end against a real on-disk
+  SQLite file, not just asserted by analogy.
+- `PRAGMA table_info`'s primary-key column (`pk`, the 6th field) is a
+  nonzero, SEQUENTIAL position for composite keys, not just a boolean
+  -- confirmed directly against a real composite-PK table before
+  writing `detect_primary_key`, so a composite key comes back in its
+  real key order, not just "yes there's a PK."
+
+**Primary-key confirmation, the higher-stakes UX divergence from
+files, built deliberately asymmetric per the roadmap's own reasoning:**
+files auto-detect a join key SILENTLY today (a uniqueness-ratio
+heuristic, `_auto_detect_key`, with no confirmation prompt at all) --
+confirmed by re-reading that existing code before assuming database
+detection should work the same way. For `db://` sources, the roadmap
+explicitly calls for MORE caution ("a wrong auto-detected key against
+a real production database is a more serious mistake than a wrong key
+on a CSV"), so this is a genuinely different UX, not a copy: the real
+primary key is read from the database's own schema (not a heuristic
+guess), shown to the user explicitly, and requires interactive
+confirmation (`typer.confirm`) before anything runs -- skippable with
+`--yes` for scripted use, bypassed entirely if `--key` is passed
+explicitly. A composite (multi-column) key is detected and shown but
+reported as not-yet-usable as an actual join key (real, tracked future
+work -- `join_columns` support for `db://` specifically -- not
+silently mishandled by guessing which single column to use).
+
+**Tests:** 30 new tests in `tests/test_comparison/test_db.py`
+(connection-string parsing including the slash-counting regression,
+credential redaction, real on-disk SQLite primary-key/schema/null/
+datetime behavior, `NotImplementedError` paths for Postgres/MySQL) plus
+9 new CLI-level tests in `tests/test_cli/test_cli.py` (the full
+confirm/decline/`--yes`/explicit-`--key` flows, missing-env-var and
+missing-flag errors, no-PK and composite-PK paths, and a mixed
+database-plus-file comparison) -- all run against real SQLite files via
+`CliRunner`, the same standard the existing S3 tests hold (real moto-
+mocked AWS, never a stubbed client).
+
+316 -> 355 tests passing.
+
+**Not built, deliberately:** Postgres and MySQL connectivity itself
+(`connect`/`list_columns`/`detect_primary_key`/`query_table` all raise
+clear `NotImplementedError` for these backends, not silent wrong
+behavior); a `db` extra in `pyproject.toml` for their drivers
+(psycopg2/PyMySQL) -- not added speculatively ahead of those backends
+actually being implemented, same "don't pay for what you don't use"
+principle the existing `s3` extra already follows; `db://` support in
+`compare-dir` -- confirmed by reading that command's real code that it
+is genuinely directory/filesystem-based (`_match_files_by_name`, real
+`Path.is_dir()` checks), not a natural fit for database sources, and
+deliberately not bolted on without a real design pass of its own.
+
+## PostgreSQL: built and verified against a REAL Postgres server, not mocked
+
+Version bumped 0.1.0 -> 0.2.0 first -- the previous version was
+already live on PyPI and tagged on GitHub; shipping a genuinely new
+feature (new CLI flags, a new module) under the same version number
+would leave `pip install --upgrade` with nothing to do.
+
+**Found a real way to test this honestly, not just mocked.**
+`py-pglite` runs PGlite (a real PostgreSQL compiled to WASM) via
+Node.js/npm, both confirmed available in this environment. This let
+Postgres connectivity get the SAME verification standard SQLite got
+(a real on-disk file/server, not a stub) -- real SQL execution, real
+system-catalog schema introspection (`pg_index`/`pg_attribute`,
+`information_schema.columns`), confirmed directly before writing any
+of `db.py`'s Postgres branch.
+
+**Real dependency tradeoff, decided explicitly with the user after
+testing both options, not guessed:** psycopg2's own documentation says
+a published package "shouldn't use psycopg2-binary as a module
+dependency" (risk: multiple packages bundling conflicting `libpq`
+copies in one environment) -- but confirmed by direct testing that
+plain `psycopg2` (source) FAILS to install in a clean environment
+without `libpq-dev`/`pg_config` and a C compiler already present, a
+near-certain failure for most users, not a theoretical edge case.
+Decided on `psycopg2-binary` anyway: `wherefore` is a single-purpose
+CLI, not a multi-Postgres-dependency web app, so the library-conflict
+risk the official warning targets barely applies, while the
+install-failure risk of the alternative is immediate and real.
+
+**Real, deliberate tradeoff on pandas + psycopg2:** `pd.read_sql`
+against a raw psycopg2 connection (not a SQLAlchemy engine) prints
+"pandas only supports SQLAlchemy connectable... Other DBAPI2 objects
+are not tested." Confirmed by direct testing the warning is accurate
+about being untested upstream but NOT accurate about producing wrong
+results here (verified correct NULL handling and datetime typing
+despite it). Discussed with the user: adding SQLAlchemy as a
+dependency just to silence an accurate-but-cosmetic warning was
+rejected in favor of the smaller footprint. The warning is suppressed
+explicitly, scoped to only this one call, with a comment as the record
+of why -- not silently swallowed.
+
+**Confirmed by direct testing, things that come for free on Postgres
+that needed real workarounds on SQLite:**
+- A native `TIMESTAMP` column round-trips through `pd.read_sql` as a
+  genuine `datetime64` dtype directly, with NO parsing step needed at
+  all -- closer to Parquet's behavior than SQLite's TEXT-typed dates.
+  `query_table`'s Postgres branch correspondingly does NOT call
+  `_try_parse_datetime_columns` at all; there's nothing TEXT-typed to fix.
+- The literal `"NULL"`-string-vs-genuine-NULL distinction comes for
+  free here too, for the same underlying reason (native per-value typing).
+
+**Real bugs found and fixed while building the PGlite-backed test
+suite, all genuine limitations of the TEST TOOL, not of `db.py`'s real
+connectivity logic -- confirmed by testing `connect()` against the
+real failure in isolation each time before concluding which side the
+bug was on:**
+- PGlite's DSN is Unix-socket-only with NO "port" key at all --
+  inventing a port value when constructing a test `ConnectionInfo`
+  broke the connection ("server didn't return client encoding").
+  Fixed in the TEST fixture (`port=None` when absent), not in `db.py`,
+  since `psycopg2.connect(port=None, ...)` already correctly falls
+  back to the default -- nothing to fix in the real code.
+- PGlite is genuinely single-connection-only, confirmed in BOTH socket
+  mode and TCP mode: a second `connect()` call to the same PGlite
+  instance fails ("server didn't return client encoding"), and even a
+  FAILED connection attempt (wrong password) consumes/wedges the one
+  available slot, breaking every later test sharing that server
+  instance. Fixed by switching the shared test fixture from
+  "one connection per test" to "one connection, reused, for the whole
+  module" -- confirmed this is a PGlite limitation, not a `db.py` bug,
+  by testing `connect()` against a real multi-connection-capable
+  scenario in isolation.
+- PGlite does not enforce password authentication AT ALL -- confirmed
+  directly that connecting with a deliberately wrong password
+  succeeds. A test for "wrong password is rejected" against PGlite
+  could therefore never actually fail, testing nothing real. Replaced
+  with a test against a genuinely unreachable host/port instead, which
+  exercises the identical `OperationalError`-catching code path in
+  `connect()` without depending on auth behavior this specific tool
+  doesn't implement.
+- PGlite's minimal TCP mode doesn't correctly negotiate Postgres's SSL
+  handshake, requiring `sslmode=disable` to connect over TCP at all.
+  This surfaced a REAL, previously-undiscovered gap in `db.py` itself
+  (not just a test-tool quirk): `parse_connection_string` was silently
+  DISCARDING a connection string's query parameters entirely --
+  `ConnectionInfo` had no field for them. Fixed properly, not just
+  worked around: added `ConnectionInfo.options` (parsed from the query
+  string via `urllib.parse.parse_qs`), passed through as
+  `**info.options` to `psycopg2.connect()`. This is a genuine feature
+  now, not just a test fix -- real managed/cloud Postgres deployments
+  commonly need `sslmode` or other options specified too, for reasons
+  unrelated to PGlite's specific limitation.
+- A true end-to-end CLI test using a real `postgresql://` URI string
+  (rather than constructing `ConnectionInfo` directly) turned out to be
+  UNACHIEVABLE against PGlite specifically, confirmed by tracing the
+  actual failure: `cli.py` legitimately opens TWO separate connections
+  per `db://` source (one for primary-key detection, one for the
+  query) -- completely normal for a real multi-connection Postgres
+  server, but impossible against PGlite's single-connection limit.
+  Accepted as a real, documented constraint of the test tool rather
+  than continuing to fight it; the unit-level coverage (44 tests in
+  `test_db.py`, all passing against the real server) already proves
+  the actual logic correctly.
+
+**Tests:** 14 new real-server PostgreSQL tests (connection, schema
+introspection including composite keys, null/datetime handling, the
+suppressed-warning scope, reserved-word table names) plus 4 new
+unit-level tests for the `options`/`sslmode` feature (parsing,
+defaulting, and confirming `connect()` actually forwards them via a
+mocked `psycopg2.connect` call, since testing this against a
+real SSL-requiring server isn't available in this sandbox).
+
+355 -> 369 tests passing.
+
+**Not built, still:** MySQL connectivity (unchanged from before --
+still a clear `NotImplementedError`); `db://` support in `compare-dir`
+(unchanged, same reasoning as before); a true end-to-end CLI test with
+a real `postgresql://` URI string (confirmed unachievable against
+PGlite specifically, not abandoned without investigation -- see above).
+
+## Documentation: ARCHITECTURE.md and troubleshooting.md added
+
+Two new docs, added after explicit discussion with the user about
+scope. The user's first framing ("add a CLAUDE.md / skills") was
+clarified before building anything: the real goal was "help any
+contributor -- human or a future AI session -- ramp up on this
+codebase faster," not Claude-Code-tool-specific config files in a
+public open-source repo (which would be operational scaffolding for
+an AI assistant, not something a real `pip install wherefore` user
+would ever want or need to see). Built and named for what they
+actually do instead:
+
+- `ARCHITECTURE.md`: the wider orientation doc `CONTRIBUTING.md` never
+  tried to be (that file is scoped specifically to "adding a taxonomy
+  pattern"). Module map, the end-to-end pipeline, and a "things that
+  look like one thing but are another" section listing real, confirmed
+  gaps (the dead `reasoning/report.py` stub; the deliberately
+  asymmetric file-vs-database key auto-detection; the eval harness's
+  real CI-discoverability quirk) -- every claim in it checked against
+  the actual current code before being written, not assumed from memory
+  of having built it.
+- `troubleshooting.md`: real, specific failure modes with their actual
+  verified error message text (checked against the real source for
+  every quoted message, not reconstructed from memory) -- not generic
+  advice. Caught one real, honest gap while writing it: the doc's first
+  draft suggested a `--encoding` CLI flag for non-UTF-8 files that
+  turns out NOT to exist on the CLI at all (the underlying
+  `load_csv(encoding=...)` parameter is real, but cli.py never exposes
+  it as an option) -- fixed by documenting the actual gap honestly
+  instead of describing a feature that doesn't exist.

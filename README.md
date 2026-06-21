@@ -46,6 +46,7 @@ files in two minutes: see [Quickstart](#quickstart).
 [Quickstart](#quickstart) · [Why this exists](#why-this-exists) ·
 [What's built](#whats-built) · [Architecture](#architecture) ·
 [Evals](#evals--why-trust-the-explanations) · [All flags](#all-flags) ·
+[Troubleshooting](https://github.com/tracelore/wherefore/blob/main/troubleshooting.md) ·
 [Contributing](#contributing)
 
 ---
@@ -87,7 +88,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs everything, and runs the test suite
-(should show **316 passed**, no API key needed — the test suite uses a
+(should show **369 passed**, no API key needed — the test suite uses a
 fake AI provider, zero network calls). Safe to re-run.
 
 Works the same with `.csv`, `.json`, `.parquet`, or `.xlsx`/`.xls` —
@@ -173,11 +174,12 @@ statistical detection, AI explanation, and a scored eval harness.
 | | |
 |---|---|
 | **Formats** | CSV, JSON, Parquet, Excel — local or `s3://`, auto-detected, mix-and-match |
+| **Database** | SQLite and PostgreSQL (`db://table_name` + `--source-conn-env`/`--target-conn-env`) — MySQL not yet |
 | **Modes** | One file pair (`compare`) or a whole directory (`compare-dir`) |
 | **Taxonomy** | 8 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision`, `encoding_mismatch`, `dedup_failure`, `key_mismatch` |
 | **AI layer** | Verified against the real Claude API twice — manually and via the scored eval harness — 100% match on a small (seven-fixture) sample |
 | **Privacy** | Redacts emails/SSNs/cards/phones before any `--explain` call, on by default |
-| **Tests** | 316 passing, including a real (mocked) S3 round-trip and end-to-end runs against real generated files |
+| **Tests** | 369 passing, including a real (mocked) S3 round-trip, a real on-disk SQLite database, a real PostgreSQL server (via PGlite), and end-to-end runs against real generated files |
 
 `dedup_failure` and `key_mismatch` are structurally different from the
 other six — `dedup_failure` detects duplicated rows (re-inserted with
@@ -195,11 +197,25 @@ instead — see `TAXONOMY.md`). Neither is yet wired into the automated
 eval harness above (that harness currently only scores column-mismatch
 patterns) — tracked honestly as a gap, not hidden.
 
+**Database connectivity is real for SQLite and PostgreSQL, not yet for
+MySQL.** `db://table_name` reads a connection string from an
+environment variable (never the command line itself, so credentials
+never end up in argv or shell history) and auto-detects the table's
+real primary key from its own schema metadata — shown to you for
+confirmation before anything runs, since a wrong guess against a real
+database is a more serious mistake than a wrong guess against a CSV.
+See [Database sources](#database-sources) below. PostgreSQL support is
+verified against a real running Postgres server (via PGlite, not
+mocked) — primary-key detection (including composite keys), null
+handling, and native timestamp typing all confirmed directly, the same
+standard SQLite's tests hold. MySQL connection strings are recognized
+but raise a clear "not yet implemented" error if you actually try to
+connect — tracked, not silently broken.
+
 **Not built yet:** wiring `dedup_failure`/`key_mismatch` into the eval
-harness, more fixture coverage at scale, and database connectivity
-(Postgres, MySQL,
-SQLite). File-based sources — local and `s3://` — and CSV/JSON/Parquet/
-Excel are all supported today. See [`TAXONOMY.md`](https://github.com/tracelore/wherefore/blob/main/TAXONOMY.md) for
+harness, more fixture coverage at scale, and MySQL connectivity.
+SQLite, PostgreSQL, local files, and `s3://` — CSV/JSON/Parquet/
+Excel — are all supported today. See [`TAXONOMY.md`](https://github.com/tracelore/wherefore/blob/main/TAXONOMY.md) for
 the current pattern list and what's planned next.
 
 <details>
@@ -334,6 +350,66 @@ wherefore compare s3://old-bucket/accounts.csv s3://new-bucket/accounts.csv
 Uses the standard AWS credential chain (env vars, `~/.aws/credentials`,
 IAM role, `AWS_PROFILE`) — `wherefore` doesn't invent its own.
 
+### Database sources
+
+[#database-sources](#database-sources)
+
+`wherefore` can read directly from SQLite or PostgreSQL — MySQL
+connection strings are recognized but not yet connectable (a clear
+"not yet implemented" error, not a silent failure):
+
+```bash
+export SOURCE_DB="sqlite:////absolute/path/to/old_export.sqlite"
+export TARGET_DB="postgresql://user:password@host:5432/mydb"
+wherefore compare db://accounts db://accounts \
+    --source-conn-env SOURCE_DB --target-conn-env TARGET_DB
+```
+
+Two things are deliberate, not incidental:
+
+- **The connection string lives in an environment variable, never on
+  the command line.** `--source-conn-env SOURCE_DB` passes the NAME of
+  an env var, not the connection string itself — so a password never
+  ends up in `argv`, shell history, or a process list.
+- **A wrong key against a real database is worse than a wrong key
+  against a CSV.** Without `--key`, `wherefore` auto-detects the
+  table's real primary key from the database's own schema, shows it
+  to you, and waits for confirmation before running anything. Pass
+  `--yes` to skip the prompt once you trust the detection (e.g. in a
+  script), or `--key` to specify one explicitly and skip the prompt
+  entirely.
+
+PostgreSQL needs the optional `psycopg2` driver:
+
+```bash
+pip install "wherefore[db]"
+```
+
+Mixing a database source with a file is fine — comparing a live table
+against a CSV export, for example:
+
+```bash
+wherefore compare db://accounts old_export.csv --source-conn-env SOURCE_DB --key account_id
+```
+
+A composite (multi-column) primary key is detected and shown, but
+can't be used directly as a join key yet — pass `--key` with a single
+column name to proceed, or treat this as a sign the table needs more
+than `wherefore` currently models for that comparison.
+
+SQLite connection strings follow the standard convention (the same one
+SQLAlchemy uses): `sqlite:///relative/path.sqlite` for a relative path,
+`sqlite:////absolute/path.sqlite` for absolute (note the 4th slash is
+the path's own leading slash, not an extra separator). PostgreSQL
+connection strings accept query parameters that get passed straight
+through to the driver, e.g. `?sslmode=require` for a connection that
+needs SSL, or `?sslmode=disable` for one that explicitly shouldn't try
+to negotiate it:
+
+```bash
+export SOURCE_DB="postgresql://user:password@host:5432/mydb?sslmode=require"
+```
+
 ### A whole migration, not one table
 
 ```bash
@@ -403,6 +479,11 @@ wherefore compare SOURCE TARGET [OPTIONS]
                                 Requires ANTHROPIC_API_KEY. Makes real, billed API calls. Off by default.
   --no-redact                  Disable automatic redaction of emails/SSNs/cards/phones before
                                 sending data to Claude with --explain. Redaction is ON by default.
+  --source-conn-env TEXT       Required if SOURCE is db://table_name: the NAME of an env var
+                                holding a real connection string. Never the connection string itself.
+  --target-conn-env TEXT       Same as --source-conn-env, for TARGET.
+  --yes / -y                   Skip the interactive confirmation prompt for an auto-detected
+                                database primary key (db:// sources only).
 
 wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
 
@@ -411,7 +492,21 @@ wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
 ```
 </details>
 
+## Troubleshooting
+
+Hit an error message? Most of `wherefore`'s errors are written to be
+specific and actionable on their own, but
+[`troubleshooting.md`](https://github.com/tracelore/wherefore/blob/main/troubleshooting.md)
+collects the real, specific failure modes encountered while building
+and using this tool — installation issues, file-reading gotchas, key
+matching, database connections, S3, and the AI layer.
+
 ## Contributing
+
+New to the codebase? [`ARCHITECTURE.md`](https://github.com/tracelore/wherefore/blob/main/ARCHITECTURE.md)
+is the orientation doc — module layout, the end-to-end pipeline, and a
+handful of real "looks like X but is actually Y" gaps worth knowing
+before you assume otherwise.
 
 Contributions are welcome, especially new taxonomy patterns. Start
 with [`CONTRIBUTING.md`](https://github.com/tracelore/wherefore/blob/main/CONTRIBUTING.md) — the pattern contract, why

@@ -33,6 +33,14 @@ from wherefore.clustering.cluster_mismatches import (
     cluster_mismatches,
     detect_row_presence_patterns,
 )
+from wherefore.comparison.db import (
+    _is_db_source,
+    _table_name_from_db_source,
+    connect as db_connect,
+    detect_primary_key,
+    parse_connection_string,
+    query_table,
+)
 from wherefore.comparison.diff_engine import compare as run_diff
 from wherefore.comparison.key_matching import fuzzy_match_keys
 from wherefore.comparison.loaders import load_file
@@ -156,10 +164,155 @@ def _run_comparison(
     )
 
 
+def _load_source(
+    source: str,
+    conn_env_var: str | None,
+    side_label: str,
+):
+    """
+    The single dispatch point compare() calls instead of load_file()
+    directly -- mirrors loaders.py's own internal dispatch discipline
+    (check the special case BEFORE doing anything path-like) one level
+    up, at the CLI layer, since db:// is a CLI-only source syntax, not
+    a file format load_file() should know about.
+
+    For a db:// source: resolves `conn_env_var` (an ENVIRONMENT
+    VARIABLE NAME, never a literal connection string -- see db.py's
+    module docstring for why) to its real value, parses it, connects,
+    and queries the named table. Primary-key detection/confirmation is
+    NOT done here -- see _detect_db_primary_keys/_confirm_db_primary_key,
+    called separately from compare() before this, since the
+    confirmation decision needs visibility into BOTH sides' detected
+    keys at once (showing one side's prompt, getting a "yes", then
+    discovering the other side disagrees, would be a worse user
+    experience than one combined prompt).
+
+    For anything else: unchanged behavior, delegates to load_file().
+
+    `side_label` ("source" or "target") is only used to make error
+    messages specific about which of the two inputs failed --
+    cosmetic, not behavioral.
+    """
+    if not _is_db_source(source):
+        return load_file(source)
+
+    if not conn_env_var:
+        raise ValueError(
+            f"{source!r} uses the db:// syntax but no connection-string environment "
+            f"variable was given for the {side_label} side. Pass "
+            f"--{side_label}-conn-env YOUR_ENV_VAR_NAME, where YOUR_ENV_VAR_NAME is "
+            "set to a real connection string (e.g. export "
+            'YOUR_ENV_VAR_NAME="sqlite:////absolute/path/to/file.sqlite").'
+        )
+
+    conn_str = os.environ.get(conn_env_var)
+    if conn_str is None:
+        raise ValueError(
+            f"Environment variable {conn_env_var!r} is not set. It should hold a "
+            "real database connection string, e.g. "
+            f'export {conn_env_var}="sqlite:////absolute/path/to/file.sqlite". '
+            "wherefore reads the connection string from an env var, never from the "
+            "command line itself, so credentials never end up in argv or shell history."
+        )
+
+    table_name = _table_name_from_db_source(source)
+    info = parse_connection_string(conn_str)
+    conn = db_connect(info)
+    return query_table(conn, table_name)
+
+
+def _detect_db_primary_keys(
+    source: str, target: str, source_conn_env: str | None, target_conn_env: str | None
+) -> dict[str, list[str] | None]:
+    """
+    For each side that's a db:// source, connects and reads the
+    database's own schema metadata to find its real primary key --
+    NOT the file-based heuristic _auto_detect_key uses (uniqueness
+    ratio, "id"/"key" in the column name). Returns a dict keyed by
+    side_label ("source"/"target") to whatever was found, omitting
+    sides that aren't db:// sources at all (nothing to detect for a
+    plain file).
+
+    Deliberately separate from _load_source: this function ONLY
+    detects and reports, it does not decide whether to proceed --
+    that decision belongs to _confirm_db_primary_key, called from
+    compare() after this, so the user sees BOTH sides' detected keys
+    (or lack thereof) in one combined prompt before anything runs.
+    """
+    detected: dict[str, list[str] | None] = {}
+    for side_label, src, conn_env in (
+        ("source", source, source_conn_env),
+        ("target", target, target_conn_env),
+    ):
+        if not _is_db_source(src) or not conn_env:
+            continue
+        conn_str = os.environ.get(conn_env)
+        if conn_str is None:
+            continue  # _load_source will raise its own clear error for this later
+        table_name = _table_name_from_db_source(src)
+        info = parse_connection_string(conn_str)
+        conn = db_connect(info)
+        detected[side_label] = detect_primary_key(conn, table_name)
+    return detected
+
+
+def _confirm_db_primary_key(detected: dict[str, list[str] | None], assume_yes: bool) -> bool:
+    """
+    Shows the user exactly what primary key(s) were auto-detected from
+    real database schema metadata for each db:// source involved, and
+    requires explicit confirmation before the comparison proceeds --
+    per the roadmap's own stated reasoning: a wrong auto-detected key
+    against a REAL, possibly production database is a materially more
+    serious mistake than a wrong key on a CSV (a CSV mistake produces
+    a wrong report; a database mistake means a query ran against a
+    live system based on a guess nobody reviewed). This is why this
+    confirmation step exists for db:// sources but NOT for files, even
+    though both have an auto-detect path -- the stakes are genuinely
+    different, not just stylistically inconsistent.
+
+    Returns True if the user confirmed (or --yes was passed), False if
+    they declined -- compare() is responsible for exiting cleanly on
+    False, this function never calls typer.Exit itself, since "what
+    happens on decline" is a caller decision (e.g. compare_dir, if/when
+    db:// support is added there, might want to skip-and-continue
+    rather than abort the whole batch the way compare() does).
+
+    If `detected` is empty (neither side is a db:// source with a
+    resolved connection), there's nothing to confirm -- returns True
+    immediately without printing anything, so file-only comparisons
+    are completely unaffected by this function existing.
+    """
+    if not detected:
+        return True
+
+    typer.echo()
+    for side_label, pk_columns in detected.items():
+        if pk_columns is None:
+            typer.secho(
+                f"  {side_label}: no primary key found in the database schema for this table.",
+                fg=typer.colors.YELLOW,
+            )
+        else:
+            typer.secho(
+                f"  {side_label}: detected primary key {', '.join(pk_columns)!r} from the database schema.",
+                fg=typer.colors.CYAN,
+            )
+
+    if assume_yes:
+        typer.echo("(--yes passed, proceeding without interactive confirmation)")
+        return True
+
+    return typer.confirm("Proceed with this key?", default=False)
+
+
 @app.command()
 def compare(
-    source: str = typer.Argument(..., help="Path to the source CSV/JSON file"),
-    target: str = typer.Argument(..., help="Path to the target CSV/JSON file"),
+    source: str = typer.Argument(
+        ..., help="Path to the source file (CSV/JSON/Parquet/Excel, local or s3://), or db://table_name."
+    ),
+    target: str = typer.Argument(
+        ..., help="Path to the target file (CSV/JSON/Parquet/Excel, local or s3://), or db://table_name."
+    ),
     key: str = typer.Option(
         None, "--key", help="Join key column name. If omitted, wherefore tries to auto-detect one."
     ),
@@ -188,6 +341,29 @@ def compare(
         "card numbers, phone numbers) before sending values to the Claude API with --explain. "
         "Redaction is ON by default -- only disable this if you've already vetted your data.",
     ),
+    source_conn_env: str = typer.Option(
+        None,
+        "--source-conn-env",
+        help="Required if SOURCE uses db://table_name: the NAME of an environment variable "
+        "holding the real connection string (e.g. --source-conn-env SOURCE_DB, with "
+        'export SOURCE_DB="sqlite:////absolute/path/to/file.sqlite" set separately). '
+        "The connection string itself is never accepted on the command line, so it never "
+        "ends up in argv or shell history.",
+    ),
+    target_conn_env: str = typer.Option(
+        None,
+        "--target-conn-env",
+        help="Same as --source-conn-env, for TARGET.",
+    ),
+    assume_yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the interactive confirmation prompt for an auto-detected database primary "
+        "key (db:// sources only; has no effect on file-based comparisons). Use with care -- "
+        "this is the one safety check standing between a wrong guess and a query running "
+        "against a real database unreviewed.",
+    ),
 ) -> None:
     """
     Compare two datasets and show what's different, grouped by pattern
@@ -196,6 +372,10 @@ def compare(
     Example:
         wherefore compare old_export.csv new_export.csv --output report.md
         wherefore compare old_export.csv new_export.csv --explain
+        export SOURCE_DB="sqlite:////absolute/path/to/old.sqlite"
+        export TARGET_DB="sqlite:////absolute/path/to/new.sqlite"
+        wherefore compare db://accounts db://accounts \\
+            --source-conn-env SOURCE_DB --target-conn-env TARGET_DB
     """
     if explain_flag and not os.environ.get("ANTHROPIC_API_KEY"):
         typer.secho(
@@ -206,10 +386,48 @@ def compare(
         )
         raise typer.Exit(code=1)
 
+    if key is None:
+        try:
+            detected_keys = _detect_db_primary_keys(source, target, source_conn_env, target_conn_env)
+        except (ValueError, FileNotFoundError, NotImplementedError) as e:
+            typer.secho(f"Error connecting to database: {e}", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        if detected_keys:
+            if not _confirm_db_primary_key(detected_keys, assume_yes):
+                typer.secho("Aborted.", fg=typer.colors.YELLOW)
+                raise typer.Exit(code=1)
+            # A detected single-column key becomes the explicit --key
+            # for the rest of this run, exactly as if the user had
+            # passed it themselves -- this is the ONLY path by which a
+            # database's auto-detected key is actually used, and only
+            # after the confirmation above succeeded. A composite key
+            # (more than one column) isn't reducible to the single
+            # `key` string the rest of the pipeline expects yet --
+            # that's real, tracked future work (join_columns support
+            # for db:// sources specifically), not silently mishandled:
+            # it's reported in the error below rather than guessed at.
+            single_column_keys = {
+                side: cols for side, cols in detected_keys.items() if cols and len(cols) == 1
+            }
+            if single_column_keys:
+                key = next(iter(single_column_keys.values()))[0]
+            elif any(cols and len(cols) > 1 for cols in detected_keys.values()):
+                typer.secho(
+                    "Error: a composite (multi-column) primary key was detected, but "
+                    "wherefore's --key currently only supports a single column for db:// "
+                    "sources. Pass --key explicitly with one column name to proceed "
+                    "(this will compare using that single column as the join key, not "
+                    "the full composite key).",
+                    fg=typer.colors.RED,
+                    err=True,
+                )
+                raise typer.Exit(code=1)
+
     try:
-        source_df = load_file(source)
-        target_df = load_file(target)
-    except (FileNotFoundError, ValueError, UnicodeDecodeError, RuntimeError, ImportError) as e:
+        source_df = _load_source(source, source_conn_env, "source")
+        target_df = _load_source(target, target_conn_env, "target")
+    except (FileNotFoundError, ValueError, UnicodeDecodeError, RuntimeError, ImportError, NotImplementedError) as e:
         typer.secho(f"Error loading files: {e}", fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1)
 

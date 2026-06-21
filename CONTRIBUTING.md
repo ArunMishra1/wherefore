@@ -1,5 +1,11 @@
 # Contributing
 
+New to this codebase? [`ARCHITECTURE.md`](./ARCHITECTURE.md) is the
+wider map — module layout, the end-to-end pipeline, and a few real
+"looks like X but is actually Y" gaps worth knowing before you dig in.
+This doc covers the most common single contribution: adding a new
+taxonomy pattern.
+
 ## Adding a new failure pattern to the taxonomy
 
 This is the main way the project grows. It should require **zero
