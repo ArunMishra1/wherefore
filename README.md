@@ -62,7 +62,7 @@ Or via Homebrew, if you'd rather not think about Python at all:
 
 ```bash
 brew tap tracelore/wherefore
-brew install wherefore
+brew install tracelore/wherefore/wherefore
 ```
 
 (Homebrew installs a prebuilt bottle on Apple Silicon Macs running a

@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -28,5 +28,12 @@ jobs:
         run: pytest tests/ -v
 
       - name: Run eval harness (informational, non-blocking for now)
-        run: pytest evals/harness/ -v
+        # NOT `pytest evals/harness/` -- confirmed by direct testing that
+        # this silently collects 0 items (no test_*.py files exist under
+        # evals/harness/, just run_eval.py/scoring.py) and reports as a
+        # passing 0.01s run, meaning this step had never actually
+        # exercised the eval harness at all despite looking green. The
+        # real entry point, used everywhere else in this project, is the
+        # module invocation below.
+        run: python3 -m evals.harness.run_eval
         continue-on-error: true
