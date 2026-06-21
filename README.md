@@ -59,7 +59,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs everything, and runs the test suite
-(should show **248 passed**, no API key needed — the test suite uses a
+(should show **266 passed**, no API key needed — the test suite uses a
 fake AI provider, zero network calls). Safe to re-run.
 
 Then, on any two files of yours:
@@ -133,13 +133,15 @@ statistical detection, AI explanation, and a scored eval harness.
 |---|---|
 | **Formats** | CSV, JSON, Parquet, Excel — local or `s3://`, auto-detected, mix-and-match |
 | **Modes** | One file pair (`compare`) or a whole directory (`compare-dir`) |
-| **Taxonomy** | 5 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision` |
+| **Taxonomy** | 6 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision`, `encoding_mismatch` |
 | **AI layer** | Verified against the real Claude API twice — manually and via the scored eval harness — 100% match on a small (six-fixture) sample |
 | **Privacy** | Redacts emails/SSNs/cards/phones before any `--explain` call, on by default |
-| **Tests** | 248 passing, including a real (mocked) S3 round-trip and end-to-end runs against real generated files |
+| **Tests** | 266 passing, including a real (mocked) S3 round-trip and end-to-end runs against real generated files |
 
-**Not built yet:** more fixture coverage at scale, a sixth pattern
-(`encoding_mismatch`), and database connectivity (Postgres, MySQL,
+**Not built yet:** more fixture coverage at scale, two patterns needing
+clustering extensions (`key_mismatch`, `dedup_failure` -- both detect
+via missing/extra rows, not column mismatches), and database connectivity
+(Postgres, MySQL,
 SQLite). File-based sources — local and `s3://` — and CSV/JSON/Parquet/
 Excel are all supported today. Live queue: [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
 
@@ -208,13 +210,14 @@ pattern, tracking "correctly said unrecognized" separately from
 "confidently named the wrong pattern" — very different failure modes a
 naive right/wrong scorer would conflate.
 
-**Statistical mode, free, no API key, against all 6 fixtures:**
+**Statistical mode, free, no API key, against all 7 fixtures:**
 
 ```
 $ python3 -m evals.harness.run_eval
-Total cases: 6
+Total cases: 7
 Overall accuracy (correct match + honest abstain): 100.00%
 
+  encoding_mismatch: precision=1.00 recall=1.00
   enum_drift: precision=1.00 recall=1.00
   float_precision: precision=1.00 recall=1.00
   null_type_coercion: precision=1.00 recall=1.00
@@ -231,7 +234,7 @@ one by reasoning about the actual values, not by defaulting to
 whichever candidate came first.
 
 Both are reproducible — clone the repo, run the commands yourself.
-Six fixtures proves the *mechanism* works end-to-end against the real
+Seven fixtures proves the *mechanism* works end-to-end against the real
 API; it doesn't prove either layer is bulletproof at scale. That's the
 honest caveat, and expanding fixture coverage is the tracked next step
 in [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).

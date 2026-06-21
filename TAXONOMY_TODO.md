@@ -268,8 +268,11 @@ against the registry (same loop just proven for timezone_shift).
 
 ## Remaining patterns (build in this order, easiest signature first)
 
-`truncation`, `enum_drift`, `null_type_coercion`, and `float_precision`
-are done. `encoding_mismatch` is next:
+`truncation`, `enum_drift`, `null_type_coercion`, `float_precision`,
+and `encoding_mismatch` are done. `key_mismatch` and `dedup_failure`
+are next -- both need clustering extensions (see "Clustering extension
+for row-presence patterns" below), not just a YAML + corruptor like
+the previous five:
 
 - [x] `truncation` -- string values cut off at a fixed length.
       Signature: target value is a literal prefix of source, strictly
@@ -298,10 +301,16 @@ are done. `encoding_mismatch` is next:
       a relative-magnitude threshold -- see "float_precision: a
       signature-design lesson" below for why the magnitude approach
       was tried first and rejected after a real false positive.
-- [ ] `encoding_mismatch` -- UTF-8 vs Latin-1 (or similar) decode
-      errors. Signature candidate: target string contains
-      mojibake-pattern characters (specific byte-sequence artifacts)
-      where source has clean text in the same field.
+- [x] `encoding_mismatch` -- UTF-8 vs Latin-1 decode mismatch
+      ("mojibake"). Signature: checks the EXACT reverse mechanism
+      directly (target.encode('latin-1').decode('utf-8') == source)
+      rather than a regex over "suspicious" byte-sequence characters,
+      which was the original speculative plan before the corruptor
+      existed -- same "check the mechanism, not its footprint" lesson
+      as float_precision. Confirmed a real, legitimate partial overlap
+      with consistent_value_mapping (~0.33, not zero) on some fixtures,
+      same class of honest overlap already documented for
+      null_type_coercion/enum_drift -- correctly stays below threshold.
 - [ ] `key_mismatch` -- fuzzy join issues; rows that SHOULD match
       don't, due to key formatting drift. This one is unusual: its
       "mismatch" often shows up as source-only/target-only rows rather
@@ -315,11 +324,16 @@ are done. `encoding_mismatch` is next:
 
 ## Order rationale
 
-`encoding_mismatch` next: a genuinely new signature SHAPE again (byte-
-level artifact detection in text, not magnitude or structure), and a
-good candidate to validate the "real evidence before YAML" discipline
-once more before `dedup_failure`, the one genuinely compound case and
-the real test of the `confirmation_function` escape hatch.
+`key_mismatch` and `dedup_failure` next: both surfaced (while starting
+to design `dedup_failure`) as needing a real clustering extension, not
+just a YAML + corruptor -- their "mismatch" shows up as
+target_only_keys/source_only_keys (rows entirely present on one side),
+which `cluster_mismatches()` currently has no path to examine at all.
+See "Clustering extension for row-presence patterns" below for the
+design. `dedup_failure` is also the real test of the
+`confirmation_function` escape hatch (row-count delta signature +
+duplicate-key confirmation) flagged in schema.py since the original
+design.
 
 ## null_type_coercion: three real bugs found building one pattern
 
@@ -436,7 +450,7 @@ mechanism is bulletproof (one correct disambiguation on one fixture is
 a single data point), but it's real evidence the design choice was
 sound, not just defensible in theory.
 
-Honest caveat: 6 fixtures is a small sample for either eval mode. A
+Honest caveat: 7 fixtures is a small sample for either eval mode. A
 100% result from 6 cases is a meaningfully weaker claim than 100% from
 60 -- this run proves the MECHANISM works correctly end-to-end against
 the real API, not that either layer is bulletproof at scale. Worth not
@@ -670,3 +684,63 @@ migration scenario (two buckets, two CSV exports, one timezone_shift
 fixture).
 
 248 tests passing.
+
+## encoding_mismatch: the 6th pattern
+
+Built using the same "check the mechanism, not its footprint"
+discipline as float_precision: the original plan (see the now-stale
+checklist entry this replaced) was a regex over mojibake-pattern
+byte-sequence characters, but the actual corruptor and signature use
+the EXACT reverse transform instead --
+target.encode('latin-1').decode('utf-8') == source, confirmed by
+direct testing this is the literal inverse of how real UTF-8-as-
+Latin-1 mojibake is produced (e.g. "José" <-> "JosÃ©"), not an
+approximation. A genuinely non-ASCII value (accented characters,
+non-Latin scripts) is required for this corruption to do anything --
+pure-ASCII values are identical in UTF-8 and Latin-1, so a row is only
+reported as affected if the transform actually changed something,
+same guard pattern as truncation.py and float_precision.py.
+
+Confirmed a real, legitimate partial overlap with
+consistent_value_mapping (scores ~0.33, not a hard zero) on some real
+fixtures -- the synthetic name generator occasionally repeats a first
+name across different last names, and a repeated source value mapping
+consistently to the same mojibake target is, technically, also a
+"consistent value mapping" for that subset. Same class of honest,
+documented overlap as null_type_coercion/enum_drift; correctly stays
+well below the 0.9 confidence threshold in practice.
+
+Eval fixtures expanded to 7 (was 6); 266 tests passing.
+
+## Clustering extension for row-presence patterns (key_mismatch, dedup_failure)
+
+Starting to design `dedup_failure` surfaced a real, structural gap:
+its actual signal does NOT show up in `diff_result.mismatches` at all.
+Confirmed by direct testing -- concatenating a source DataFrame with a
+deliberate sample of its own rows (simulating a migration re-run that
+re-inserted already-migrated records) produces ZERO column-level
+mismatches; the duplicated rows show up entirely as
+`diff_result.target_only_keys`, since each duplicate key is treated as
+"an extra row that doesn't have a matching partner" by the join logic,
+not as a value that differs from anything.
+
+This means `cluster_mismatches()` -- which currently only ever
+examines `diff_result.mismatches`, grouped by column -- has NO path to
+detect this at all, regardless of what signature function or YAML
+exists. The same structural gap applies to `key_mismatch`: a row whose
+key was reformatted and not resolved by `--fuzzy-keys` also shows up
+as target_only_keys/source_only_keys, not a column mismatch.
+
+This is real, deliberate scope beyond "add a YAML + corruptor" (the
+pattern that worked for the previous five) -- needs a new concept
+(tentatively: a `RowPresenceCluster`, parallel to the existing
+column-based `Cluster`) and a new code path in `cluster_mismatches()`
+that examines `target_only_keys`/`source_only_keys` directly. NOT YET
+BUILT -- this section documents the design finding and the decision to
+build it properly (confirmed with the user) rather than skip these two
+patterns or build a half version. Concrete design questions still
+open: how `explain()` and the CLI report render a row-presence
+finding (no "source_value -> target_value" pair exists for a row that's
+simply absent), and whether `dedup_failure`'s `confirmation_function`
+escape hatch operates on the row-presence data directly or needs its
+own dedicated check against the full DiffResult.

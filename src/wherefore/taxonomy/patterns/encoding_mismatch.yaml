@@ -1,0 +1,45 @@
+id: encoding_mismatch
+display_name: "Character Encoding Mismatch"
+category: encoding
+
+description: >
+  Text was written in one character encoding (typically UTF-8) but
+  read back under a different one (typically Latin-1/ISO-8859-1),
+  producing "mojibake" -- recognizable garbled text where accented or
+  non-ASCII characters become multi-character sequences (e.g. "José"
+  becoming "JosÃ©"). This happens when an ETL step, database
+  connection, or file read declares the wrong encoding for the
+  underlying bytes.
+
+detection_hints:
+  - applies_to_dtypes: ["string"]
+    signature: "mojibake_reversible"
+    description: >
+      Checks the EXACT mechanism directly: does
+      target_value.encode('latin-1').decode('utf-8') recover
+      source_value exactly? Real mojibake is deterministically
+      reversible this way -- this is the literal inverse of how the
+      corruption occurs, not an approximation via regex over
+      "suspicious" characters.
+
+llm_context: >
+  Mojibake is most visible on names and free text containing accented
+  characters (café, José, Müller) or non-Latin scripts -- ASCII-only
+  values are unaffected by this bug regardless of whether the
+  encoding mismatch is present, since UTF-8 and Latin-1 agree on the
+  ASCII range. If only SOME rows in the column are affected while
+  others pass through cleanly, that's consistent with mixed-encoding
+  source data rather than a single blanket encoding bug.
+
+synthetic_corruption:
+  generator: "wherefore.synthetic.corruptors.encoding_mismatch:apply"
+  params_schema:
+    affected_fraction:
+      type: float
+      default: 0.5
+      description: "Fraction of non-null rows in the column to corrupt"
+
+severity_default: medium
+references:
+  - "https://en.wikipedia.org/wiki/Mojibake"
+  - "https://en.wikipedia.org/wiki/ISO/IEC_8859-1"

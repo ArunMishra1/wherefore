@@ -283,12 +283,47 @@ def float32_precision_drift(mismatches: list[MismatchRow]) -> float:
     return evidence_count / total_comparable
 
 
+def mojibake_reversible(mismatches: list[MismatchRow]) -> float:
+    """
+    Confidence that mismatches in this cluster are explained by a
+    UTF-8 vs Latin-1 encoding mismatch. Checks the EXACT mechanism
+    directly: does target_value.encode('latin-1').decode('utf-8')
+    recover source_value exactly? Real mojibake is deterministically
+    reversible this way -- confirmed by direct testing this is the
+    literal inverse of how the corruption is produced, not an
+    approximation via regex over "suspicious" characters.
+
+    Returns 0.0 for an empty cluster or non-string values.
+    """
+    if not mismatches:
+        return 0.0
+
+    evidence_count = 0
+    total_comparable = 0
+    for m in mismatches:
+        if not isinstance(m.source_value, str) or not isinstance(m.target_value, str):
+            continue
+        total_comparable += 1
+        try:
+            recovered = m.target_value.encode("latin-1").decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            continue
+        if recovered == m.source_value:
+            evidence_count += 1
+
+    if total_comparable == 0:
+        return 0.0
+
+    return evidence_count / total_comparable
+
+
 SIGNATURE_REGISTRY: dict[str, Callable[[list[MismatchRow]], float]] = {
     "constant_offset_subset": constant_offset_subset,
     "truncated_prefix": truncated_prefix,
     "consistent_value_mapping": consistent_value_mapping,
     "null_sentinel_coercion": null_sentinel_coercion,
     "float32_precision_drift": float32_precision_drift,
+    "mojibake_reversible": mojibake_reversible,
 }
 
 

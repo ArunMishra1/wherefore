@@ -19,6 +19,7 @@ from wherefore.clustering.cluster_mismatches import (
 )
 from wherefore.comparison.diff_engine import compare
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, HEALTHCARE_PATIENTS, generate_dataset
+from wherefore.synthetic.corruptors.encoding_mismatch import apply as drift_encoding
 from wherefore.synthetic.corruptors.enum_drift import apply as drift
 from wherefore.synthetic.corruptors.float_precision import apply as drift_float
 from wherefore.synthetic.corruptors.null_type_coercion import apply as coerce_null
@@ -240,3 +241,16 @@ def test_float_precision_matches_cleanly_alongside_other_corruptions():
 
     assert [p.pattern_id for p in clusters_by_column["balance"].candidate_patterns] == ["float_precision"]
     assert [p.pattern_id for p in clusters_by_column["opened_at"].candidate_patterns] == ["timezone_shift"]
+
+
+def test_encoding_mismatch_matches_cleanly_alongside_other_corruptions():
+    source = generate_dataset(HEALTHCARE_PATIENTS, n_rows=50, seed=1)
+    target, _ = drift_encoding(source, column="patient_name", affected_fraction=1.0, seed=1)
+    target, _ = apply(target, column="encounter_date", offset_hours=9.0, affected_fraction=0.3, seed=2)
+
+    result = compare(source, target, join_columns="patient_id")
+    clusters = cluster_mismatches(result)
+    clusters_by_column = {c.column: c for c in clusters}
+
+    assert [p.pattern_id for p in clusters_by_column["patient_name"].candidate_patterns] == ["encoding_mismatch"]
+    assert [p.pattern_id for p in clusters_by_column["encounter_date"].candidate_patterns] == ["timezone_shift"]

@@ -14,14 +14,14 @@ from evals.harness.scoring import Outcome, summarize_run
 
 def test_real_fixtures_score_correctly_via_statistical_eval():
     """
-    The actual eval run against the six real, committed fixtures.
+    The actual eval run against the seven real, committed fixtures.
     Expects 100% statistical accuracy -- if this regresses, something
     upstream broke (a corruptor's output shape changed, a signature's
     confidence threshold logic regressed, dtype-family matching broke
     again, etc.) -- this is the harness doing exactly its job.
     """
     scored_cases = run_statistical_eval()
-    assert len(scored_cases) == 6
+    assert len(scored_cases) == 7
 
     summary = summarize_run(scored_cases)
     assert summary.overall_accuracy() == 1.0
@@ -32,6 +32,7 @@ def test_real_fixtures_score_correctly_via_statistical_eval():
     assert by_fixture["fixture_enum_drift_001"].outcome == Outcome.TRUE_POSITIVE
     assert by_fixture["fixture_null_type_coercion_001"].outcome == Outcome.TRUE_POSITIVE
     assert by_fixture["fixture_float_precision_001"].outcome == Outcome.TRUE_POSITIVE
+    assert by_fixture["fixture_encoding_mismatch_001"].outcome == Outcome.TRUE_POSITIVE
     assert by_fixture["fixture_unrecognized_001"].outcome == Outcome.HONEST_ABSTAIN
 
 
@@ -67,4 +68,5 @@ def test_each_fixture_predicts_its_own_pattern_not_a_different_one():
     assert by_fixture["fixture_enum_drift_001"].predicted_pattern_id == "enum_drift"
     assert by_fixture["fixture_null_type_coercion_001"].predicted_pattern_id == "null_type_coercion"
     assert by_fixture["fixture_float_precision_001"].predicted_pattern_id == "float_precision"
+    assert by_fixture["fixture_encoding_mismatch_001"].predicted_pattern_id == "encoding_mismatch"
     assert by_fixture["fixture_unrecognized_001"].predicted_pattern_id is None

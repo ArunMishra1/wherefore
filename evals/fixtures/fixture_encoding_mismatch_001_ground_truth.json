@@ -1,0 +1,31 @@
+{
+  "fixture_id": "fixture_encoding_mismatch_001",
+  "source_file": "fixture_encoding_mismatch_001_source.csv",
+  "target_file": "fixture_encoding_mismatch_001_target.csv",
+  "injected_corruptions": [
+    {
+      "pattern_id": "encoding_mismatch",
+      "params": {
+        "affected_fraction": 1.0
+      },
+      "affected_rows": [
+        1,
+        8,
+        9,
+        14,
+        18,
+        24,
+        26,
+        27,
+        33,
+        35,
+        48,
+        50
+      ],
+      "affected_column": "customer_name"
+    }
+  ],
+  "generation_seed": 1,
+  "domain": "FINANCIAL_ACCOUNTS",
+  "join_column": "account_id"
+}

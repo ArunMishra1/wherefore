@@ -15,12 +15,14 @@ from wherefore.clustering.signatures import (
     constant_offset_subset,
     float32_precision_drift,
     get_signature,
+    mojibake_reversible,
     null_sentinel_coercion,
     truncated_prefix,
 )
 from wherefore.comparison.diff_engine import compare
 from wherefore.comparison.diff_result import MismatchRow
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, HEALTHCARE_PATIENTS, generate_dataset
+from wherefore.synthetic.corruptors.encoding_mismatch import apply as drift_encoding
 from wherefore.synthetic.corruptors.enum_drift import apply as drift
 from wherefore.synthetic.corruptors.float_precision import apply as drift_float
 from wherefore.synthetic.corruptors.null_type_coercion import apply as coerce_null
@@ -343,3 +345,69 @@ def test_empty_cluster_returns_zero_for_float32_precision_drift():
 
 def test_signature_registry_contains_float32_precision_drift():
     assert "float32_precision_drift" in SIGNATURE_REGISTRY
+
+
+def test_real_encoding_mismatch_fixture_scores_full_confidence():
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=50, seed=1)
+    target, _ = drift_encoding(source, column="customer_name", affected_fraction=1.0, seed=1)
+    result = compare(source, target, join_columns="account_id")
+    confidence = mojibake_reversible(result.mismatches_for_column("customer_name"))
+    assert confidence == 1.0
+
+
+def test_known_mojibake_example_is_detected():
+    mismatches = [_make_mismatch(1, "José", "JosÃ©")]
+    assert mojibake_reversible(mismatches) == 1.0
+
+
+def test_unrelated_string_change_scores_zero():
+    mismatches = [_make_mismatch(1, "approved", "denied")]
+    assert mojibake_reversible(mismatches) == 0.0
+
+
+def test_truncated_value_does_not_false_positive_as_mojibake():
+    mismatches = [_make_mismatch(1, "Susan Miller", "Susan Mi")]
+    assert mojibake_reversible(mismatches) == 0.0
+
+
+def test_does_not_false_positive_on_truncation_or_enum_drift_fixtures():
+    source = generate_dataset(HEALTHCARE_PATIENTS, n_rows=30, seed=42)
+
+    target1, _ = truncate(source, column="patient_name", max_length=8, affected_fraction=0.5, seed=1)
+    result1 = compare(source, target1, join_columns="patient_id")
+    assert mojibake_reversible(result1.mismatches_for_column("patient_name")) == 0.0
+
+    mapping = {"approved": "APPROVED", "denied": "REJECTED"}
+    target2, _ = drift(source, column="claim_status", value_mapping=mapping, affected_fraction=0.5, seed=1)
+    result2 = compare(source, target2, join_columns="patient_id")
+    assert mojibake_reversible(result2.mismatches_for_column("claim_status")) == 0.0
+
+
+def test_known_partial_overlap_with_consistent_value_mapping_stays_below_threshold():
+    """
+    Documents a real, confirmed partial overlap: a real
+    encoding_mismatch fixture scores ~0.33 on consistent_value_mapping
+    (not zero), since the synthetic name generator occasionally
+    repeats the same first name across different last names, and a
+    repeated source value consistently mapping to the same mojibake
+    target is, technically, also a "consistent value mapping" for
+    that subset. Same kind of legitimate low-level overlap already
+    documented for null_type_coercion/enum_drift -- correctly stays
+    well below the 0.9 confidence threshold.
+    """
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=50, seed=1)
+    target, _ = drift_encoding(source, column="customer_name", affected_fraction=1.0, seed=1)
+    result = compare(source, target, join_columns="account_id")
+    mismatches = result.mismatches_for_column("customer_name")
+
+    confidence = consistent_value_mapping(mismatches)
+    assert confidence < 0.9
+    assert confidence > 0.0
+
+
+def test_empty_cluster_returns_zero_for_mojibake_reversible():
+    assert mojibake_reversible([]) == 0.0
+
+
+def test_signature_registry_contains_mojibake_reversible():
+    assert "mojibake_reversible" in SIGNATURE_REGISTRY
