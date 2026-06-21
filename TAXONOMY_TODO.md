@@ -27,6 +27,7 @@ instead; come back here for the "why" behind any specific decision.
 - [Clustering extension for row-presence patterns](#clustering-extension-for-row-presence-patterns-key_mismatch-dedup_failure)
 - [dedup_failure: built](#dedup_failure-built-using-the-row-presence-extension-above)
 - [key_mismatch: built, with an architecture fork and a false positive](#key_mismatch-built-with-a-real-architecture-fork-and-a-real-false-positive-caught-mid-build)
+- [PyPI packaging: a real bug caught before shipping](#pypi-packaging-a-real-severe-bug-caught-before-it-could-ship)
 
 ---
 
@@ -926,3 +927,73 @@ wired into the automated eval harness. Verified by dedicated tests
 instead.
 
 316 tests passing.
+
+## PyPI packaging: a real, severe bug caught before it could ship
+
+Before touching Homebrew (which needs a real PyPI release or tagged
+GitHub release to point a formula at), did the PyPI packaging prep
+first. This surfaced a genuine, previously-invisible bug.
+
+**The bug.** Built a real wheel (`python3 -m build --wheel`) and
+installed it into a clean venv -- something no prior round had done,
+since every test so far ran against an editable install
+(`pip install -e .`), which reads `src/` directly off disk regardless
+of packaging metadata. The installed CLI crashed immediately with
+`TaxonomyLoadError: Patterns directory not found` on the very first
+`compare` run. Confirmed the cause by listing the wheel's actual
+contents: ALL EIGHT `taxonomy/patterns/*.yaml` files were silently
+missing -- `setuptools` only includes `.py` files by default unless
+package data is explicitly declared, and nothing in `pyproject.toml`
+declared it. Found a second instance of the identical bug while
+searching for any other non-`.py` file under `src/wherefore/`:
+`reasoning/prompts/cluster_explanation_v1.md`, the `--explain` prompt
+template, with the same failure mode on that code path.
+
+**The fix.** Added `[tool.setuptools.package-data]` to `pyproject.toml`
+declaring both glob patterns. Rebuilt the wheel, confirmed both file
+types now present in the archive, then re-ran the full clean-venv
+install test: a real `compare` run now succeeds, including the
+`key_mismatch`/`dedup_failure` row-presence path; `--explain` now
+fails for the correct, intended reason (missing `ANTHROPIC_API_KEY`),
+not a missing template file. Built the `sdist` too (PyPI publishing
+guides are explicit that a wheel alone isn't sufficient -- dependents
+building from source need it) and confirmed it independently contains
+both file types.
+
+**Secondary fixes found while completing the metadata:**
+- Added `project.urls` (Homepage/Repository/Issues), keywords, and
+  explicit per-version Python classifiers (3.10-3.13) -- none of this
+  existed before; PyPI's listing page would have shown a bare,
+  unhelpful project page otherwise.
+- Caught a real TOML structural bug while adding `project.urls`:
+  placing the new table between `classifiers` and `dependencies`
+  (instead of after the whole `[project]` table's keys) silently
+  nested `dependencies` inside `[project.urls]` instead of leaving it
+  in `[project]`. `python3 -m build` failed loudly and immediately
+  with a clear validation error (`project.urls.dependencies` must be
+  string) -- exactly the kind of fast, loud failure that makes this
+  safe to fix immediately rather than something that could have
+  shipped silently broken.
+- `README.md`'s relative file links (`./TAXONOMY.md` etc.) were
+  confirmed (via real, tracked PyPA `readme_renderer`/`packaging-problems`
+  issues) to break on PyPI's standalone long-description rendering,
+  since there's no relative base to resolve against there the way
+  there is on GitHub. Rewrote all 9 of them to absolute
+  `github.com/tracelore/wherefore/blob/main/...` URLs. Left the
+  relative links BETWEEN other markdown files (e.g.
+  `TAXONOMY.md` -> `./TAXONOMY_TODO.md`) untouched -- those are correct
+  as-is on GitHub, where PyPI's rendering quirk doesn't apply.
+
+**Validated with `twine check`** (PASSED on both `sdist` and `wheel`)
+and a full clean-venv real install + real `compare` run, not just by
+inspecting the build log.
+
+**What couldn't be verified locally, and why:** whether the project
+name `wherefore` is actually available on PyPI (no fetch access to
+arbitrary `pypi.org/project/...` URLs without a prior matching search
+result -- search results were inconclusive), and whether a Homebrew
+formula actually installs (no `brew` binary, no macOS, no network path
+to Homebrew's infrastructure from this environment). Both require the
+user's own PyPI account/local machine to confirm -- the dist artifacts
+and exact upload commands were handed off rather than guessed at as
+"done."

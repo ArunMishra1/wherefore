@@ -177,7 +177,7 @@ patterns) — tracked honestly as a gap, not hidden.
 harness, more fixture coverage at scale, and database connectivity
 (Postgres, MySQL,
 SQLite). File-based sources — local and `s3://` — and CSV/JSON/Parquet/
-Excel are all supported today. See [`TAXONOMY.md`](./TAXONOMY.md) for
+Excel are all supported today. See [`TAXONOMY.md`](https://github.com/tracelore/wherefore/blob/main/TAXONOMY.md) for
 the current pattern list and what's planned next.
 
 <details>
@@ -190,7 +190,7 @@ subtler one: a magnitude-based heuristic that looked right scored a
 real false positive on an adversarial test case, fixed by checking the
 underlying mechanism (an exact float32 round-trip) directly instead of
 approximating its size. Full account, including how each was found and
-fixed: [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
+fixed: [`TAXONOMY_TODO.md`](https://github.com/tracelore/wherefore/blob/main/TAXONOMY_TODO.md).
 </details>
 
 ## Architecture
@@ -225,7 +225,7 @@ source file, target file        (CSV, JSON, Parquet, or Excel)
 `src/wherefore/taxonomy/patterns/`, validated against a strict schema.
 Adding a new pattern means writing a YAML file and a small corruptor
 function — never touching clustering or reasoning code. See
-[`CONTRIBUTING.md`](./CONTRIBUTING.md) for the contract.
+[`CONTRIBUTING.md`](https://github.com/tracelore/wherefore/blob/main/CONTRIBUTING.md) for the contract.
 
 **Clustering and reasoning are deliberately separated.** Clustering
 only ever produces statistical observations ("these 12 rows differ by
@@ -272,7 +272,7 @@ Both are reproducible — clone the repo, run the commands yourself.
 Seven fixtures proves the *mechanism* works end-to-end against the real
 API; it doesn't prove either layer is bulletproof at scale. That's the
 honest caveat, and expanding fixture coverage is the tracked next step
-in [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
+in [`TAXONOMY_TODO.md`](https://github.com/tracelore/wherefore/blob/main/TAXONOMY_TODO.md).
 
 <details>
 <summary>The multi-candidate case, if you want the detail</summary>
@@ -285,7 +285,7 @@ a causal judgment that belongs to the AI layer, not clustering. The
 eval harness scores this correctly too: a true pattern counts as found
 if it appears anywhere among the reported candidates, not only if it's
 listed first. Full story of how this was found and fixed:
-[`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
+[`TAXONOMY_TODO.md`](https://github.com/tracelore/wherefore/blob/main/TAXONOMY_TODO.md).
 </details>
 
 ## Usage
@@ -363,7 +363,7 @@ Be precise about scope: this is pattern-based detection of
 — it won't know that a name or a home address is sensitive. Full
 detail, including a documented false-positive case found during
 testing (long numeric IDs can resemble card numbers):
-[`SECURITY.md`](./SECURITY.md).
+[`SECURITY.md`](https://github.com/tracelore/wherefore/blob/main/SECURITY.md).
 
 ## All flags
 
@@ -392,13 +392,13 @@ wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
 ## Contributing
 
 Contributions are welcome, especially new taxonomy patterns. Start
-with [`CONTRIBUTING.md`](./CONTRIBUTING.md) — the pattern contract, why
+with [`CONTRIBUTING.md`](https://github.com/tracelore/wherefore/blob/main/CONTRIBUTING.md) — the pattern contract, why
 patterns are built corruptor-first rather than YAML-first, and the
 design decisions worth knowing before you dig in.
 
-Found a security issue? See [`SECURITY.md`](./SECURITY.md).
+Found a security issue? See [`SECURITY.md`](https://github.com/tracelore/wherefore/blob/main/SECURITY.md).
 
 ## License
 
-Apache License 2.0 — see [`LICENSE`](./LICENSE). Contributions are
+Apache License 2.0 — see [`LICENSE`](https://github.com/tracelore/wherefore/blob/main/LICENSE). Contributions are
 accepted under the same license (see `NOTICE` for attribution).

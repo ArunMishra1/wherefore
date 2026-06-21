@@ -9,12 +9,20 @@ description = "Explains WHY two datasets differ, in plain English, with eval-bac
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
+keywords = ["data-diff", "data-quality", "data-migration", "csv", "datacompy", "etl-testing"]
 classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Intended Audience :: Developers",
     "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Database",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
 ]
 
 dependencies = [
@@ -51,8 +59,25 @@ s3 = [
 [project.scripts]
 wherefore = "wherefore.cli:app"
 
+[project.urls]
+Homepage = "https://github.com/tracelore/wherefore"
+Repository = "https://github.com/tracelore/wherefore"
+Issues = "https://github.com/tracelore/wherefore/issues"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# Without this, `pip install` from a real built wheel/sdist silently
+# omits every non-.py file under src/wherefore/ -- confirmed by
+# actually building a wheel and installing it into a clean venv: the
+# CLI crashed immediately with TaxonomyLoadError on the very first
+# `compare` run, since taxonomy/patterns/*.yaml wasn't in the wheel at
+# all (editable installs (`pip install -e .`) never caught this, since
+# they read src/ directly off disk regardless of packaging metadata).
+# Also covers reasoning/prompts/*.md, the --explain prompt template,
+# which has the identical failure mode on that code path.
+wherefore = ["taxonomy/patterns/*.yaml", "reasoning/prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "evals/harness"]
