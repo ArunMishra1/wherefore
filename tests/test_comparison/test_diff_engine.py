@@ -229,3 +229,41 @@ def test_target_only_rows_and_keys_stay_consistent():
     keys_from_key_field = {tuple(sorted(k.items())) for k in result.target_only_keys}
     keys_from_row_field = {tuple(sorted(r.key.items())) for r in result.target_only_rows}
     assert keys_from_key_field == keys_from_row_field
+
+
+def test_default_key_match_strategy_is_exact(financial_source):
+    """Every caller that doesn't pass fuzzy_match_confidence gets the
+    same behavior as before this parameter was added -- key_match_strategy
+    stays 'exact', and fuzzy_match_confidence stays None."""
+    result = compare(financial_source, financial_source.copy(), join_columns="account_id")
+    assert result.key_match_strategy == "exact"
+    assert result.fuzzy_match_confidence is None
+
+
+def test_fuzzy_match_confidence_is_passed_through_not_discarded():
+    """
+    compare() doesn't compute fuzzy match confidence itself (fuzzy
+    resolution happens upstream, in key_matching.py, before the
+    DataFrame reaches compare() -- see compare()'s docstring). This
+    confirms it's faithfully threaded into the resulting DiffResult
+    when a caller supplies it, rather than silently dropped.
+    """
+    source = pd.DataFrame({"id": ["A-1", "A-2"], "val": [10, 20]})
+    target = pd.DataFrame({"id": ["A-1", "A-2"], "val": [10, 20]})
+
+    confidence_map = {"A-1": 100.0, "A-2": 82.5}
+    result = compare(source, target, join_columns="id", fuzzy_match_confidence=confidence_map)
+
+    assert result.key_match_strategy == "fuzzy"
+    assert result.fuzzy_match_confidence == confidence_map
+
+
+def test_empty_fuzzy_match_confidence_dict_keeps_strategy_exact():
+    """An empty dict is falsy -- passed through as 'no fuzzy matching
+    actually happened' rather than spuriously flipping key_match_strategy
+    to 'fuzzy' for a run that had nothing to report."""
+    source = pd.DataFrame({"id": [1, 2], "val": [10, 20]})
+    target = pd.DataFrame({"id": [1, 2], "val": [10, 20]})
+
+    result = compare(source, target, join_columns="id", fuzzy_match_confidence={})
+    assert result.key_match_strategy == "exact"

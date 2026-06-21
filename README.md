@@ -59,7 +59,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs everything, and runs the test suite
-(should show **289 passed**, no API key needed — the test suite uses a
+(should show **316 passed**, no API key needed — the test suite uses a
 fake AI provider, zero network calls). Safe to re-run.
 
 Then, on any two files of yours:
@@ -152,22 +152,28 @@ statistical detection, AI explanation, and a scored eval harness.
 |---|---|
 | **Formats** | CSV, JSON, Parquet, Excel — local or `s3://`, auto-detected, mix-and-match |
 | **Modes** | One file pair (`compare`) or a whole directory (`compare-dir`) |
-| **Taxonomy** | 7 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision`, `encoding_mismatch`, `dedup_failure` |
+| **Taxonomy** | 8 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision`, `encoding_mismatch`, `dedup_failure`, `key_mismatch` |
 | **AI layer** | Verified against the real Claude API twice — manually and via the scored eval harness — 100% match on a small (seven-fixture) sample |
 | **Privacy** | Redacts emails/SSNs/cards/phones before any `--explain` call, on by default |
-| **Tests** | 289 passing, including a real (mocked) S3 round-trip and end-to-end runs against real generated files |
+| **Tests** | 316 passing, including a real (mocked) S3 round-trip and end-to-end runs against real generated files |
 
-`dedup_failure` is structurally different from the other six — it
-detects duplicated rows (re-inserted with a new key, not the same key
-twice), which shows up as extra rows rather than a column-level
-mismatch. It has its own clustering path
-(`detect_row_presence_patterns`) and is verified by real, dedicated
-tests, but isn't yet wired into the automated eval harness above (that
-harness currently only scores column-mismatch patterns) — tracked
-honestly as a gap, not hidden.
+`dedup_failure` and `key_mismatch` are structurally different from the
+other six — `dedup_failure` detects duplicated rows (re-inserted with
+a new key, not the same key twice); `key_mismatch` detects a row whose
+join key was reformatted (`EMP-1001` vs `EMP1001`) so it never matched
+at all. Both show up as extra/missing rows rather than a column-level
+mismatch, both have their own clustering path
+(`detect_row_presence_patterns`), and both are verified by real,
+dedicated tests — including a regression test confirming they don't
+false-positive on each other's fixtures, and a regression test for a
+real false positive caught while building `key_mismatch` (two
+genuinely unrelated keys sharing a domain's ID prefix scored close
+enough on a similarity heuristic to need a deterministic check
+instead — see `TAXONOMY.md`). Neither is yet wired into the automated
+eval harness above (that harness currently only scores column-mismatch
+patterns) — tracked honestly as a gap, not hidden.
 
-**Not built yet:** `key_mismatch` (the other row-presence pattern —
-unresolved key-formatting drift), wiring `dedup_failure` into the eval
+**Not built yet:** wiring `dedup_failure`/`key_mismatch` into the eval
 harness, more fixture coverage at scale, and database connectivity
 (Postgres, MySQL,
 SQLite). File-based sources — local and `s3://` — and CSV/JSON/Parquet/

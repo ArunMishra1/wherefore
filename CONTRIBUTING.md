@@ -44,11 +44,18 @@ confirmation), but the real implementation turned out to need only one
 direct check (`duplicate_content_fraction`, comparing an unmatched
 row's full content against the other side's dataset) — a good example
 of a speculative design decision turning out differently once actually
-built. See `taxonomy/schema.py` module docstring for the mechanism,
-still available if a future pattern genuinely needs it. If we pass
-roughly 12-15 patterns and find ourselves writing confirmation
-functions for most of them, that's the signal to revisit this and
-design a real multi-signature schema instead of guessing now.
+built. `key_mismatch` is a second data point for the same lesson: a
+fuzzy/approximate similarity score (rapidfuzz's `fuzz.ratio`) was tried
+first and produced a real false positive (two unrelated keys sharing a
+domain's common ID prefix scored high enough to be indistinguishable
+from a genuine reformat); switching to a deterministic
+normalization-equality check resolved it with one direct check, no
+second confirming signature needed. See `taxonomy/schema.py` module
+docstring for the `confirmation_function` mechanism, still available
+if a future pattern genuinely needs it. If we pass roughly 12-15
+patterns and find ourselves writing confirmation functions for most of
+them, that's the signal to revisit this and design a real
+multi-signature schema instead of guessing now.
 
 **Why eval fixtures are committed to git, not generated on demand.**
 The project's headline claims (e.g. "X% accuracy on Y corruption

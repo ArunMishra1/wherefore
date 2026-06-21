@@ -317,6 +317,73 @@ def mojibake_reversible(mismatches: list[MismatchRow]) -> float:
     return evidence_count / total_comparable
 
 
+def key_format_similarity(
+    unmatched_rows: list,
+    comparison_unmatched_rows: list,
+    join_columns: list[str],
+) -> float:
+    """
+    Confidence that unmatched rows (rows present on only one side of
+    the comparison) are explained by key_mismatch: for each unmatched
+    row, does its key NORMALIZE (separators stripped, case folded) to
+    the same string as some unmatched row's key on the OTHER side? A
+    record whose key was merely reformatted normalizes identically to
+    its counterpart; a genuinely new/removed record's key won't,
+    UNLESS it happens to collide after normalization too -- which is
+    exactly as informative a "no" as an exact-key collision would be.
+
+    A raw rapidfuzz fuzz.ratio threshold was tried first and rejected
+    after direct testing surfaced a real false positive: two
+    GENUINELY UNRELATED records in the same domain (e.g.
+    "ACCT-100002" and "ACCT-100022" -- different accounts, not a
+    reformat of one another) score ~91 against each other purely from
+    sharing a long common prefix and digit-heavy format -- well above
+    the 75 floor key_matching.py uses, and not reliably separable from
+    a genuine reformat's ~93-95 score by tuning the threshold alone
+    (the gap between "false positive" and "true positive" scores
+    wasn't clean enough to draw a line through; see key_matching.py's
+    own docstring on this same shared-characters risk). A normalization
+    EQUALITY check has no such gradient to mistune: either two keys are
+    the same record's key under a deterministic transform, or they
+    aren't. This mirrors float32_precision_drift and mojibake_reversible
+    elsewhere in this module, both of which check the literal reverse
+    mechanism rather than approximating it with a magnitude/score
+    heuristic, for the same reason.
+
+    Only join_columns[0] is used for composite keys -- v1 simplicity
+    matching dedup_failure's own scope; multi-column key normalization
+    would need to decide how to combine per-column results, which isn't
+    needed by any real fixture yet.
+
+    Returns 0.0 if either side has no unmatched rows to compare,
+    consistent with duplicate_content_fraction's empty-input contract.
+    """
+    if not unmatched_rows or not comparison_unmatched_rows:
+        return 0.0
+
+    key_col = join_columns[0]
+    comparison_normalized = {
+        _normalize_key(str(r.key.get(key_col))) for r in comparison_unmatched_rows
+    }
+
+    match_count = sum(
+        1
+        for record in unmatched_rows
+        if _normalize_key(str(record.key.get(key_col))) in comparison_normalized
+    )
+
+    return match_count / len(unmatched_rows)
+
+
+def _normalize_key(key: str) -> str:
+    """The deterministic transform key_format_similarity checks for
+    equality under: separators stripped, case folded. Mirrors the
+    exact reformat synthetic/corruptors/key_mismatch.py's corruptor
+    applies, so a real injected key_mismatch fixture normalizes to an
+    exact match by construction -- not an approximation of it."""
+    return key.replace("-", "").replace("_", "").lower()
+
+
 def duplicate_content_fraction(unmatched_rows: list, comparison_df, join_columns: list[str]) -> float:
     """
     Confidence that unmatched rows (rows present on only one side of

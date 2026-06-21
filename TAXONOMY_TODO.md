@@ -26,6 +26,7 @@ instead; come back here for the "why" behind any specific decision.
 - [encoding_mismatch: the 6th pattern](#encoding_mismatch-the-6th-pattern)
 - [Clustering extension for row-presence patterns](#clustering-extension-for-row-presence-patterns-key_mismatch-dedup_failure)
 - [dedup_failure: built](#dedup_failure-built-using-the-row-presence-extension-above)
+- [key_mismatch: built, with an architecture fork and a false positive](#key_mismatch-built-with-a-real-architecture-fork-and-a-real-false-positive-caught-mid-build)
 
 ---
 
@@ -298,10 +299,12 @@ against the registry (same loop just proven for timezone_shift).
 ## Remaining patterns (build in this order, easiest signature first)
 
 `truncation`, `enum_drift`, `null_type_coercion`, `float_precision`,
-and `encoding_mismatch` are done. `key_mismatch` and `dedup_failure`
-are next -- both need clustering extensions (see "Clustering extension
+`encoding_mismatch`, `dedup_failure`, and `key_mismatch` are all done.
+The last two needed clustering extensions (see "Clustering extension
 for row-presence patterns" below), not just a YAML + corruptor like
-the previous five:
+the first five -- see their dedicated "built" sections further down
+for what the real implementation turned out to need versus what was
+planned here:
 
 - [x] `truncation` -- string values cut off at a fixed length.
       Signature: target value is a literal prefix of source, strictly
@@ -340,16 +343,20 @@ the previous five:
       with consistent_value_mapping (~0.33, not zero) on some fixtures,
       same class of honest overlap already documented for
       null_type_coercion/enum_drift -- correctly stays below threshold.
-- [ ] `key_mismatch` -- fuzzy join issues; rows that SHOULD match
-      don't, due to key formatting drift. This one is unusual: its
-      "mismatch" often shows up as source-only/target-only rows rather
-      than column-level mismatches, so it likely needs its own
-      handling path in clustering, not just a signature.
-- [ ] `dedup_failure` -- duplicate rows not collapsed during
-      migration. Needs a `confirmation_function` per the schema's
-      escape hatch (row-count delta signature + duplicate-key
-      confirmation) -- flagged in schema.py design notes as the
-      compound-signature example.
+- [x] `key_mismatch` -- fuzzy join issues; rows that SHOULD match
+      don't, due to key formatting drift. As anticipated here, its
+      "mismatch" shows up as source-only/target-only rows, not
+      column-level mismatches -- handled via the same row-presence
+      clustering path as `dedup_failure`. See the dedicated "built"
+      section below: the real implementation diverged from this plan
+      in one way worth knowing -- a real false positive forced a
+      switch from a fuzzy similarity score to a deterministic
+      normalization check.
+- [x] `dedup_failure` -- duplicate rows not collapsed during
+      migration. Did NOT end up needing the `confirmation_function`
+      escape hatch anticipated here -- see the dedicated "built"
+      section below for why one direct signature
+      (`duplicate_content_fraction`) turned out to be sufficient.
 
 ## Order rationale
 
@@ -818,4 +825,104 @@ dedicated tests instead. Extending the harness to also score
 row-presence clusters is tracked as real future work, not silently
 assumed done.
 
-289 tests passing.
+## key_mismatch: built, with a real architecture fork and a real false positive caught mid-build
+
+Two things surfaced while building this that changed the plan from
+what was originally sketched.
+
+**Architecture fork.** Reading the real code before writing anything
+turned up TWO different things `key_mismatch` could plausibly mean,
+both already half-anticipated in the codebase:
+
+1. **Row-presence** (this section, what got built): an unmatched row's
+   key normalizes to match an unmatched key on the other side --
+   structurally identical to `dedup_failure`'s shape, just comparing
+   KEYS instead of row VALUE CONTENT.
+2. **Low-confidence accepted fuzzy match**: `key_matching.py`'s module
+   docstring and `DiffResult.fuzzy_match_confidence`'s docstring both
+   already described a SEPARATE, not-yet-built signal -- a row that
+   `--fuzzy-keys` DID resolve, but only barely cleared the confidence
+   floor, worth flagging for human review even though it was
+   "resolved." `cli.py`'s `_apply_fuzzy_key_resolution` was silently
+   DISCARDING this confidence data before this round (used it to
+   rewrite keys, then threw the `FuzzyMatchResult` away).
+
+Decided (confirmed with the user) to build (1) now as the real
+`key_mismatch` pattern, and separately fix the confidence-discarding
+issue in (2) as infrastructure -- `DiffResult.fuzzy_match_confidence`
+is now actually threaded through from `_apply_fuzzy_key_resolution` ->
+`compare()` -- WITHOUT inventing a detector for it yet. A first attempt
+at a confidence formula for (2) (`1 - (raw_score - floor) / (100 -
+floor)`) was tried and rejected before writing any detector code: it
+scored a genuinely risky off-by-one-digit accepted match (e.g.
+"CUST-00042" vs "CUST-00043", both very plausibly different real
+records) at only 0.40 confidence -- well below the 0.9 default
+threshold every other signature uses, meaning the detector would
+almost never fire on the exact case it exists to catch. Shipping that
+would have been worse than not building it: a detector that looks
+done but silently doesn't work. (2) stays explicitly deferred.
+
+**The false positive.** The first real implementation of (1) used
+`rapidfuzz.fuzz.ratio` with `key_matching.py`'s own 75.0 accept floor
+as the threshold -- the same scorer and floor `--fuzzy-keys` already
+uses, which seemed like the obviously consistent choice. Confirmed by
+direct testing that this produces a real false positive: two
+GENUINELY UNRELATED keys from the same synthetic domain (different
+generator seeds, so different underlying records) share a long common
+ID prefix/format by construction -- e.g. `"ACCT-100002"` vs
+`"ACCT-100022"`, different accounts, not a reformat of one another --
+and score ~91 against each other, indistinguishable from a genuine
+reformat's ~93-95. There was no clean gap to threshold on; tuning the
+number wouldn't have fixed it.
+
+Fixed by switching to a deterministic check instead of an approximate
+score: does the key NORMALIZE (separators stripped, case folded) to
+the exact same string as a key on the other side? Either two keys are
+the same record's key under that transform, or they aren't -- no
+gradient to mistune. This mirrors `float32_precision_drift` and
+`mojibake_reversible` elsewhere in the taxonomy, both of which check
+the literal reverse mechanism rather than approximating it with a
+score/magnitude heuristic, for the same reason. Re-tested against the
+same false-positive pair (now correctly 0.0) and the real positive
+fixture (still 1.0) before considering this done.
+
+**Legitimate overlap with `dedup_failure`, confirmed not a bug.** A row
+whose key was merely reformatted has, by construction, non-key VALUES
+identical to its own original row -- which is exactly what
+`duplicate_content_fraction` checks for too. Both signatures correctly
+fire at confidence 1.0 on the same `key_mismatch` fixture. This isn't
+suppressed: disambiguating "reformatted" from "duplicated under a
+coincidentally similar new key" needs the keys themselves compared,
+which is a judgment call left to the reasoning layer, same principle
+as the existing `null_sentinel_coercion`/`consistent_value_mapping`
+multi-match design. Covered by a dedicated regression test, plus a
+separate regression test confirming `dedup_failure`'s OWN fixture
+(a duplicate under an unrelated new key like `DUPE-0`) does NOT
+spuriously trigger `key_mismatch`.
+
+**A real, separate bug found and fixed while reading `cli.py` for
+context, unrelated to `key_mismatch` itself:** `_print_row_presence_match`
+contained `typer.secho(f"Full report written to {output_path}", ...)`
+-- but that function doesn't take `output_path` as a parameter, and
+the line was misplaced inside a per-side helper instead of
+`_print_summary`. Confirmed by direct testing this was a real,
+reproducible bug, not a hypothetical: with no row-presence match (the
+common case), the success message silently never printed even though
+the report WAS written; with a row-presence match (e.g.
+`dedup_failure`), the CLI CRASHED with `NameError` -- after already
+writing the report to disk. No existing test caught this because no
+CLI test exercised `compare` against a real `dedup_failure` fixture
+end-to-end. Fixed by moving the message to the end of `_print_summary`
+(where `output_path` is actually in scope) so it prints exactly once,
+unconditionally. Covered by two new regression tests.
+
+Wired into the CLI exactly the same way `dedup_failure` was -- zero
+changes needed to `_render_report`, which already renders any
+row-presence `candidate_patterns` entry generically regardless of
+`pattern_id`.
+
+Same honestly-tracked gap as `dedup_failure`: `key_mismatch` is NOT yet
+wired into the automated eval harness. Verified by dedicated tests
+instead.
+
+316 tests passing.

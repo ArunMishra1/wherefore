@@ -20,6 +20,8 @@ import wherefore.cli as cli_module
 from wherefore.cli import app
 from wherefore.reasoning.explain import ClusterExplanation
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, generate_dataset
+from wherefore.synthetic.corruptors.dedup_failure import apply as inject_dedup_failure
+from wherefore.synthetic.corruptors.key_mismatch import apply as inject_key_mismatch
 from wherefore.synthetic.corruptors.timezone_shift import apply
 from wherefore.synthetic.corruptors.truncation import apply as truncate
 
@@ -147,6 +149,72 @@ def test_fuzzy_keys_flag_resolves_reformatted_keys(tmp_path):
     )
     assert "Rows only in source" not in with_fuzzy.output
     assert "Matched rows: 2" in with_fuzzy.output
+
+
+def test_success_message_prints_even_with_no_row_presence_finding(tmp_path):
+    """
+    Regression test for a real bug: the "Full report written to..."
+    confirmation was previously emitted from inside a helper that only
+    ran when a row-presence pattern (dedup_failure/key_mismatch)
+    matched -- so for the common case (an ordinary column mismatch,
+    nothing row-presence-related at all), the message silently never
+    printed, even though the report WAS written successfully to disk.
+    """
+    p1 = tmp_path / "source.csv"
+    p2 = tmp_path / "target.csv"
+    p1.write_text("id,val\n1,10\n2,20\n")
+    p2.write_text("id,val\n1,10\n2,99\n")  # one ordinary column mismatch, no row-presence finding
+
+    output_path = tmp_path / "report.md"
+    result = runner.invoke(app, ["compare", str(p1), str(p2), "--output", str(output_path)])
+
+    assert result.exit_code == 0
+    assert f"Full report written to {output_path}" in result.output
+    assert output_path.exists()
+
+
+def test_success_message_prints_exactly_once_when_row_presence_pattern_matches(tmp_path):
+    """
+    Regression test for a real, severe bug: the same misplaced
+    "Full report written to..." line referenced an `output_path`
+    variable that was never actually in scope in that helper function,
+    so the CLI crashed with NameError whenever a row-presence pattern
+    (dedup_failure/key_mismatch) DID match -- AFTER the report had
+    already been written to disk, leaving the person with a real
+    report file but a crashing command and no success confirmation.
+    """
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=1)
+    target, _ = inject_dedup_failure(source, key_column="account_id", affected_fraction=0.2, seed=1)
+
+    p1 = tmp_path / "source.csv"
+    p2 = tmp_path / "target.csv"
+    source.to_csv(p1, index=False)
+    target.to_csv(p2, index=False)
+
+    output_path = tmp_path / "report.md"
+    result = runner.invoke(app, ["compare", str(p1), str(p2), "--key", "account_id", "--output", str(output_path)])
+
+    assert result.exit_code == 0
+    assert result.exception is None
+    assert result.output.count("Full report written to") == 1
+    assert output_path.exists()
+
+
+def test_real_key_mismatch_fixture_end_to_end(tmp_path):
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=1)
+    target, _ = inject_key_mismatch(source, key_column="account_id", affected_fraction=0.2, seed=1)
+
+    p1 = tmp_path / "source.csv"
+    p2 = tmp_path / "target.csv"
+    source.to_csv(p1, index=False)
+    target.to_csv(p2, index=False)
+
+    output_path = tmp_path / "report.md"
+    result = runner.invoke(app, ["compare", str(p1), str(p2), "--key", "account_id", "--output", str(output_path)])
+
+    assert result.exit_code == 0
+    assert "key_mismatch" in result.output
+    assert "key_mismatch" in output_path.read_text()
 
 
 def test_confidence_threshold_flag_is_respected(timezone_shift_csv_pair):

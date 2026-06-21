@@ -33,6 +33,7 @@ def compare(
     join_columns: str | list[str],
     abs_tol: float = 0.0,
     rel_tol: float = 0.0,
+    fuzzy_match_confidence: dict[str, float] | None = None,
 ) -> DiffResult:
     """
     Runs a datacompy comparison between source and target, joined on
@@ -52,6 +53,19 @@ def compare(
     DataFrame reaches `compare()`, join_columns should already align
     exactly between source and target (key_matching.py is responsible
     for normalizing mismatched key formats upstream).
+
+    `fuzzy_match_confidence` is purely a PASS-THROUGH: this function
+    does not call key_matching.py itself, since by the time a caller
+    has a DataFrame ready for compare(), fuzzy resolution (if any) has
+    already happened and the DataFrames already reflect it. If a
+    caller DID resolve fuzzy keys upstream (see cli.py's
+    _apply_fuzzy_key_resolution), it should pass the resulting
+    FuzzyMatchResult.confidence_by_target_key here so that signal isn't
+    silently discarded -- it's exactly what the key_mismatch taxonomy
+    pattern needs (see DiffResult.fuzzy_match_confidence's docstring).
+    When provided (and non-empty), key_match_strategy is set to
+    "fuzzy"; otherwise it stays "exact", matching prior behavior for
+    every caller that doesn't pass this.
     """
     if isinstance(join_columns, str):
         join_columns = [join_columns]
@@ -88,7 +102,7 @@ def compare(
 
     return DiffResult(
         join_columns=join_columns,
-        key_match_strategy="exact",
+        key_match_strategy="fuzzy" if fuzzy_match_confidence else "exact",
         source_row_count=len(source),
         target_row_count=len(target),
         matched_row_count=len(dc.intersect_rows),
@@ -98,6 +112,7 @@ def compare(
         target_only_rows=_extract_rows(dc.df2_unq_rows, join_columns),
         column_summary=column_summary,
         mismatches=mismatches,
+        fuzzy_match_confidence=fuzzy_match_confidence,
     )
 
 

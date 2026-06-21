@@ -82,6 +82,18 @@ def test_resolve_import_path_for_timezone_corruptor():
     assert (corrupted["ts"] - df["ts"] == pd.Timedelta(hours=5)).all()
 
 
+def test_resolve_import_path_for_key_mismatch_corruptor():
+    generator_path = registry.get_pattern("key_mismatch").synthetic_corruption.generator
+    apply_fn = registry.resolve_import_path(generator_path)
+
+    import pandas as pd
+
+    df = pd.DataFrame({"id": ["A-1", "A-2", "A-3"], "val": [1, 2, 3]})
+    corrupted, original_keys = apply_fn(df, key_column="id", affected_fraction=1.0, seed=1)
+    assert len(original_keys) == 3
+    assert set(corrupted["id"]) == {"A1", "A2", "A3"}
+
+
 def test_malformed_pattern_file_raises_taxonomy_load_error(tmp_path, monkeypatch):
     """Confirms the loud-failure guarantee: a broken pattern YAML
     should never be silently skipped."""

@@ -16,8 +16,10 @@ The deterministic layer between the raw DiffResult and the LLM. Two jobs:
      keep matches at or above `confidence_threshold`. If a pattern
      declares a `confirmation_function`, it's called as a second gate
      before accepting the match (the compound-signature escape hatch
-     from taxonomy/schema.py -- not yet exercised by any real pattern,
-     since dedup_failure isn't built yet, but the wiring is here).
+     from taxonomy/schema.py -- not yet exercised by any real pattern;
+     neither dedup_failure nor key_mismatch ended up needing it, since
+     a single statistical signature was sufficient for both, but the
+     wiring is here for the day a pattern genuinely needs it).
 
 `confidence_threshold` defaults to 0.9 and is a plain parameter, not a
 hardcoded constant -- callers needing stricter matching (e.g. the eval
@@ -158,23 +160,26 @@ def detect_row_presence_patterns(
 ) -> list[RowPresenceCluster]:
     """
     Examines diff_result.source_only_rows/target_only_rows for
-    row-presence patterns (currently: dedup_failure) -- the
-    counterpart to cluster_mismatches() for findings that show up as
-    entirely missing/extra rows rather than column-level value
+    row-presence patterns (currently: dedup_failure, key_mismatch) --
+    the counterpart to cluster_mismatches() for findings that show up
+    as entirely missing/extra rows rather than column-level value
     mismatches. Kept as a SEPARATE function (not folded into
     cluster_mismatches() itself) so the widely-used
     cluster_mismatches() -> list[Cluster] signature and return type
     stay completely unchanged for existing callers; this is purely
     additive.
 
-    `source_df`/`target_df` are optional -- WITHOUT them, only
-    presence itself is reported (rows exist on only one side,
-    candidate_patterns will be empty/unrecognized, since dedup_failure
-    detection specifically needs to check an unmatched row's VALUES
-    against the full set of MATCHED rows, which isn't available from
-    diff_result alone -- see RowPresenceRecord's docstring for why
-    key-only data isn't enough). Pass them when available (the CLI and
-    eval harness both have them) to get real pattern detection.
+    `source_df`/`target_df` are optional -- WITHOUT them, dedup_failure
+    detection specifically degrades to unrecognized (it needs an
+    unmatched row's VALUES checked against the full set of MATCHED
+    rows, which isn't available from diff_result alone -- see
+    RowPresenceRecord's docstring for why key-only data isn't enough).
+    key_mismatch detection does NOT need source_df/target_df -- it only
+    compares unmatched rows' KEYS against each other, which
+    diff_result already carries -- so it still runs even when neither
+    DataFrame is passed. Pass source_df/target_df when available (the
+    CLI and eval harness both have them) to get dedup_failure detection
+    too.
     """
     if not 0.0 <= confidence_threshold <= 1.0:
         raise ValueError(f"confidence_threshold must be in [0, 1], got {confidence_threshold}")
@@ -183,8 +188,9 @@ def detect_row_presence_patterns(
 
     if diff_result.target_only_rows:
         candidates = _detect_row_presence_candidates(
-            diff_result.target_only_rows,
+            unmatched_rows=diff_result.target_only_rows,
             comparison_df=source_df,
+            comparison_unmatched_rows=diff_result.source_only_rows,
             join_columns=diff_result.join_columns,
             confidence_threshold=confidence_threshold,
         )
@@ -194,8 +200,9 @@ def detect_row_presence_patterns(
 
     if diff_result.source_only_rows:
         candidates = _detect_row_presence_candidates(
-            diff_result.source_only_rows,
+            unmatched_rows=diff_result.source_only_rows,
             comparison_df=target_df,
+            comparison_unmatched_rows=diff_result.target_only_rows,
             join_columns=diff_result.join_columns,
             confidence_threshold=confidence_threshold,
         )
@@ -209,35 +216,66 @@ def detect_row_presence_patterns(
 def _detect_row_presence_candidates(
     unmatched_rows: list,
     comparison_df,
+    comparison_unmatched_rows: list,
     join_columns: list[str],
     confidence_threshold: float,
 ) -> list[RowPresenceMatch]:
     """
-    Currently implements dedup_failure detection directly (not via the
-    taxonomy registry's dtype-based dispatch, since row-presence
-    patterns don't have a column/dtype to dispatch on the way
-    column-based patterns do -- this is a deliberate, narrower path
-    for the one row-presence pattern that exists so far). If/when a
-    second row-presence pattern is added, this should be revisited to
-    decide whether a registry-style dispatch is worth the complexity
-    at that point, rather than guessing now.
+    Implements dedup_failure and key_mismatch detection directly (not
+    via the taxonomy registry's dtype-based dispatch, since
+    row-presence patterns don't have a column/dtype to dispatch on the
+    way column-based patterns do -- this is a deliberate, narrower path
+    for the two row-presence patterns that exist so far). Both checks
+    run independently and BOTH can appear in the result -- a cluster
+    being explained by one doesn't preclude the other, same principle
+    as cluster_mismatches()'s "on multiple legitimate matches" design
+    (see module docstring).
+
+    Confirmed by direct testing this isn't just a theoretical overlap:
+    a row whose KEY was merely reformatted (key_mismatch's scenario)
+    has, by construction, non-key VALUES that are byte-identical to
+    its own original row -- which is mechanically indistinguishable
+    from duplicate_content_fraction's "this unmatched row's content
+    matches some row elsewhere" check. Both signatures correctly fire
+    at confidence 1.0 on the same key_mismatch fixture. Disambiguating
+    "reformatted" from "duplicated under a coincidentally similar new
+    key" requires comparing the KEYS themselves (close match ->
+    reformatting; unrelated -> a genuine duplicate's auto-generated
+    key) -- exactly the kind of judgment this layer is designed not to
+    make on its own (see "Design reminder" below); reporting both
+    candidates honestly and leaving disambiguation to the reasoning
+    layer is the correct outcome, not a bug to suppress.
+
+    If/when a third row-presence pattern is added, this should be
+    revisited to decide whether a registry-style dispatch is worth the
+    complexity at that point, rather than guessing now.
     """
-    if comparison_df is None:
-        return []
+    from wherefore.clustering.signatures import duplicate_content_fraction, key_format_similarity
 
-    from wherefore.clustering.signatures import duplicate_content_fraction
+    candidates: list[RowPresenceMatch] = []
 
-    confidence = duplicate_content_fraction(unmatched_rows, comparison_df, join_columns)
-    if confidence < confidence_threshold:
-        return []
+    if comparison_df is not None:
+        confidence = duplicate_content_fraction(unmatched_rows, comparison_df, join_columns)
+        if confidence >= confidence_threshold:
+            candidates.append(
+                RowPresenceMatch(
+                    pattern_id="dedup_failure",
+                    signature_name="duplicate_content_fraction",
+                    confidence=confidence,
+                )
+            )
 
-    return [
-        RowPresenceMatch(
-            pattern_id="dedup_failure",
-            signature_name="duplicate_content_fraction",
-            confidence=confidence,
+    confidence = key_format_similarity(unmatched_rows, comparison_unmatched_rows, join_columns)
+    if confidence >= confidence_threshold:
+        candidates.append(
+            RowPresenceMatch(
+                pattern_id="key_mismatch",
+                signature_name="key_format_similarity",
+                confidence=confidence,
+            )
         )
-    ]
+
+    return candidates
 
 
 def cluster_mismatches(

@@ -1,0 +1,59 @@
+id: key_mismatch
+display_name: "Key Format Drift (Unresolved Join Key)"
+category: structural
+
+description: >
+  The same underlying record exists on both sides, but its join key is
+  formatted differently -- e.g. "EMP-1001" on one side vs "EMP1001" on
+  the other, after one system normalized ID formatting during
+  migration and the other didn't. Because the keys no longer match
+  exactly, the record looks like a genuinely new row on one side and a
+  genuinely missing row on the other, even though nothing about its
+  actual data changed.
+
+detection_hints:
+  - applies_to_dtypes: []
+    signature: "key_format_similarity"
+    description: >
+      This pattern's signal does NOT appear in column-level mismatches
+      at all -- confirmed by direct testing that a row whose key was
+      reformatted (dashes/underscores stripped) produces ZERO
+      column-level mismatches; the row simply has no exact-key partner
+      on the other side, so it lands in source_only_rows on one side
+      and target_only_rows on the other. Detection checks whether an
+      unmatched row's key, once normalized (separators stripped, case
+      folded), exactly matches some unmatched key on the OTHER side --
+      a deterministic equality check, not a similarity score. A
+      fuzzy-ratio threshold was tried first and rejected: two
+      genuinely unrelated keys sharing a domain's common ID prefix
+      (e.g. "ACCT-100002" vs "ACCT-100022") can score as high as a
+      genuine reformat, with no clean gap to threshold on -- the
+      normalization-equality check has no such false-positive risk.
+      Distinct from dedup_failure, which compares row VALUE CONTENT,
+      not keys. Because this pattern has no column/dtype to dispatch
+      on, it is detected via the same separate code path
+      (clustering.cluster_mismatches.detect_row_presence_patterns) that
+      dedup_failure uses.
+
+llm_context: >
+  If every affected key shares the same literal transformation (e.g.
+  every mismatch is explained by stripping dashes, or by case folding),
+  that's consistent with a single systematic reformatting step applied
+  by one side's export/import pipeline -- not a real data discrepancy.
+  Note that --fuzzy-keys (key_matching.py) would likely have resolved
+  this exact drift on its own (dash-stripping alone scores well above
+  its confidence floor); this finding mainly matters when --fuzzy-keys
+  wasn't used, or when it's worth surfacing explicitly that the gap
+  was just formatting, not a real missing/extra record.
+
+synthetic_corruption:
+  generator: "wherefore.synthetic.corruptors.key_mismatch:apply"
+  params_schema:
+    affected_fraction:
+      type: float
+      default: 0.15
+      description: "Fraction of rows whose key gets reformatted (dashes/underscores stripped) on the target side"
+
+severity_default: high
+references:
+  - "https://en.wikipedia.org/wiki/Record_linkage"

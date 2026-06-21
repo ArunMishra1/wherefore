@@ -103,10 +103,27 @@ def _run_comparison(
     if join_column not in source_df.columns or join_column not in target_df.columns:
         raise ValueError(f"Key column {join_column!r} not found in both files.")
 
+    # key_mismatch (unresolved key-formatting drift) is detected via
+    # detect_row_presence_patterns below, on diff_result.source_only_rows/
+    # target_only_rows -- it doesn't need fuzzy_match_confidence at all.
+    # fuzzy_match_confidence is threaded through to diff_result anyway
+    # (rather than discarded, as it was before) because it's real signal
+    # key_matching.py already computes and DiffResult already has a field
+    # for -- a SEPARATE, not-yet-built detector (flagging fuzzy matches
+    # that were accepted but only barely cleared the confidence floor)
+    # would consume it later. No current caller reads diff_result.
+    # fuzzy_match_confidence yet; that's an intentionally deferred next
+    # step, not dead code -- see project notes on why that detector's
+    # scoring needed more design work before shipping.
+    fuzzy_match_confidence: dict[str, float] | None = None
     if fuzzy_keys:
-        source_df, target_df = _apply_fuzzy_key_resolution(source_df, target_df, join_column)
+        source_df, target_df, fuzzy_match_confidence = _apply_fuzzy_key_resolution(
+            source_df, target_df, join_column
+        )
 
-    diff_result = run_diff(source_df, target_df, join_columns=join_column)
+    diff_result = run_diff(
+        source_df, target_df, join_columns=join_column, fuzzy_match_confidence=fuzzy_match_confidence
+    )
     clusters = cluster_mismatches(diff_result, confidence_threshold=confidence_threshold)
     row_presence_clusters = detect_row_presence_patterns(
         diff_result, source_df=source_df, target_df=target_df, confidence_threshold=confidence_threshold
@@ -406,6 +423,14 @@ def _apply_fuzzy_key_resolution(source_df, target_df, join_column):
     as-is -- they'll show up as source-only/target-only rows in the
     diff, which is the honest outcome when a key genuinely couldn't be
     confidently resolved, rather than silently forcing a guess.
+
+    Also returns match_result.confidence_by_target_key (keyed by the
+    ORIGINAL, pre-rename target key) so the caller can pass it through
+    to diff_engine.compare() instead of discarding it -- a fuzzy match
+    that was accepted but scored low is exactly the key_mismatch
+    taxonomy pattern's signal (see key_matching.py's module docstring),
+    and it's only visible here, before the rename makes the key look
+    like a clean exact match to everything downstream.
     """
     source_keys = source_df[join_column].astype(str).tolist()
     target_keys = target_df[join_column].astype(str).tolist()
@@ -426,7 +451,7 @@ def _apply_fuzzy_key_resolution(source_df, target_df, join_column):
     target_df[join_column] = target_df[join_column].astype(str).map(
         lambda k: match_result.matched_pairs.get(k, k)
     )
-    return source_df, target_df
+    return source_df, target_df, match_result.confidence_by_target_key
 
 
 def _render_report(
@@ -590,6 +615,8 @@ def _print_summary(
             if explanation is not None:
                 typer.secho(f"    AI: {explanation.narrative}", fg=typer.colors.MAGENTA)
 
+    typer.secho(f"\nFull report written to {output_path}", fg=typer.colors.GREEN)
+
 
 def _print_row_presence_match(row_presence_cluster) -> None:
     if row_presence_cluster is None or row_presence_cluster.is_unrecognized:
@@ -599,8 +626,6 @@ def _print_row_presence_match(row_presence_cluster) -> None:
             f"  matches '{match.pattern_id}' (confidence {match.confidence:.2f})",
             fg=typer.colors.CYAN,
         )
-
-    typer.secho(f"\nFull report written to {output_path}", fg=typer.colors.GREEN)
 
 
 if __name__ == "__main__":

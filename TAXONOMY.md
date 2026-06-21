@@ -17,10 +17,11 @@ not a reference doc.
 
 ## What's built
 
-Seven patterns, each with a YAML definition, a real corruptor (so it
+Eight patterns, each with a YAML definition, a real corruptor (so it
 can be tested against labeled synthetic data), and a detection
-signature. Six are column-mismatch patterns; one (`dedup_failure`) is
-structurally different — see the note below the table.
+signature. Six are column-mismatch patterns; two (`dedup_failure`,
+`key_mismatch`) are structurally different — see the note below the
+table.
 
 | Pattern | What it detects | Signature approach |
 |---|---|---|
@@ -31,14 +32,25 @@ structurally different — see the note below the table.
 | `float_precision` | Precision lost through float32 rounding | Exact float32 round-trip check, not a magnitude estimate |
 | `encoding_mismatch` | UTF-8 text misread as Latin-1 ("mojibake") | Exact reverse-transform check, not a regex |
 | `dedup_failure` | A row duplicated with a new auto-generated key | Unmatched row's content exactly matches an existing row |
+| `key_mismatch` | A row's join key was reformatted (`EMP-1001` vs `EMP1001`), so it never matched | Unmatched key normalizes (separators stripped, case folded) to match an unmatched key on the other side |
 
-`dedup_failure` is the odd one out: its signal never appears as a
-column-level mismatch — it shows up as an extra row entirely. It's
-detected through a separate code path
-(`detect_row_presence_patterns`), not the column-based dispatch the
-other six use. It's fully built and tested, but not yet wired into
-the automated eval harness (which currently only scores column
-patterns) — a known, tracked gap, not a hidden one.
+`dedup_failure` and `key_mismatch` are the odd ones out: their signal
+never appears as a column-level mismatch — it shows up as an extra row
+entirely, on both sides for `key_mismatch` (the original key on one
+side, the reformatted key on the other). Both are detected through a
+separate code path (`detect_row_presence_patterns`), not the
+column-based dispatch the other six use. Both are fully built and
+tested, but not yet wired into the automated eval harness (which
+currently only scores column patterns) — a known, tracked gap, not a
+hidden one.
+
+Worth knowing: a row affected by `key_mismatch` will also legitimately
+trigger `dedup_failure`'s signature — a reformatted key's row has, by
+construction, content identical to its own original row elsewhere in
+the data, which is exactly what `dedup_failure` checks for. Both
+findings are reported; disambiguating "reformatted" from "duplicated"
+is left to the reasoning layer, not guessed at by clustering. See
+`cluster_mismatches.py`'s `_detect_row_presence_candidates` docstring.
 
 **Eval results** (reproducible, no API key needed):
 ```bash
@@ -51,13 +63,11 @@ the full results and the honest caveat.
 
 ## What's planned
 
-- **`key_mismatch`** — a row that should have matched didn't, because
-  its key was reformatted (`EMP-1001` vs `EMP1001`) and `--fuzzy-keys`
-  either wasn't used or didn't resolve it. Like `dedup_failure`, this
-  is a row-presence pattern, not a column pattern — it reuses the same
-  clustering extension.
 - **More fixture coverage** — every pattern above is proven on one
   labeled fixture. Real statistical confidence needs more.
+- **Wiring `dedup_failure`/`key_mismatch` into the eval harness** —
+  both are fully built and unit-tested, but the harness only scores
+  column-mismatch patterns today.
 - **Database connectivity** — Postgres, MySQL, SQLite. File-based
   sources (local + `s3://`) only, today.
 

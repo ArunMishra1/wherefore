@@ -455,3 +455,81 @@ def test_duplicate_content_fraction_returns_zero_for_empty_inputs():
 
     assert duplicate_content_fraction([], pd.DataFrame({"id": [1]}), ["id"]) == 0.0
     assert duplicate_content_fraction([object()], None, ["id"]) == 0.0
+
+
+def test_key_format_similarity_detects_real_reformatted_key():
+    from wherefore.clustering.signatures import key_format_similarity
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    unmatched_rows = [RowPresenceRecord(key={"id": "ACCT100003"}, values={})]
+    comparison_unmatched_rows = [RowPresenceRecord(key={"id": "ACCT-100003"}, values={})]
+
+    confidence = key_format_similarity(unmatched_rows, comparison_unmatched_rows, join_columns=["id"])
+    assert confidence == 1.0
+
+
+def test_key_format_similarity_detects_case_only_drift():
+    from wherefore.clustering.signatures import key_format_similarity
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    unmatched_rows = [RowPresenceRecord(key={"id": "emp-1001"}, values={})]
+    comparison_unmatched_rows = [RowPresenceRecord(key={"id": "EMP-1001"}, values={})]
+
+    confidence = key_format_similarity(unmatched_rows, comparison_unmatched_rows, join_columns=["id"])
+    assert confidence == 1.0
+
+
+def test_key_format_similarity_rejects_genuinely_new_rows():
+    from wherefore.clustering.signatures import key_format_similarity
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    unmatched_rows = [RowPresenceRecord(key={"id": "ACCT-100099"}, values={})]
+    comparison_unmatched_rows = [RowPresenceRecord(key={"id": "PT-500003"}, values={})]
+
+    confidence = key_format_similarity(unmatched_rows, comparison_unmatched_rows, join_columns=["id"])
+    assert confidence == 0.0
+
+
+def test_key_format_similarity_does_not_false_positive_on_shared_prefix_unrelated_keys():
+    """
+    Confirmed by direct testing: a raw rapidfuzz fuzz.ratio threshold
+    (the first approach tried) scores two genuinely UNRELATED keys
+    sharing a domain's common ID prefix (e.g. "ACCT-100002" vs
+    "ACCT-100022" -- different accounts, not a reformat of one
+    another) at ~91, well above key_matching.py's 75 accept floor and
+    not reliably distinguishable from a genuine reformat's ~93-95
+    score. This is exactly the false positive that motivated switching
+    to a deterministic normalization-equality check, which has no such
+    risk: these two keys normalize to different strings, so they
+    correctly score 0.0 here.
+    """
+    from wherefore.clustering.signatures import key_format_similarity
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    unmatched_rows = [RowPresenceRecord(key={"id": "ACCT-100002"}, values={})]
+    comparison_unmatched_rows = [RowPresenceRecord(key={"id": "ACCT-100022"}, values={})]
+
+    confidence = key_format_similarity(unmatched_rows, comparison_unmatched_rows, join_columns=["id"])
+    assert confidence == 0.0
+
+
+def test_key_format_similarity_handles_mixed_real_and_new_rows():
+    from wherefore.clustering.signatures import key_format_similarity
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    unmatched_rows = [
+        RowPresenceRecord(key={"id": "ACCT100001"}, values={}),  # reformatted, has a partner
+        RowPresenceRecord(key={"id": "ACCT-999999"}, values={}),  # genuinely new, no partner
+    ]
+    comparison_unmatched_rows = [RowPresenceRecord(key={"id": "ACCT-100001"}, values={})]
+
+    confidence = key_format_similarity(unmatched_rows, comparison_unmatched_rows, join_columns=["id"])
+    assert confidence == 0.5
+
+
+def test_key_format_similarity_returns_zero_for_empty_inputs():
+    from wherefore.clustering.signatures import key_format_similarity
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    assert key_format_similarity([], [RowPresenceRecord(key={"id": "A-1"}, values={})], ["id"]) == 0.0
+    assert key_format_similarity([RowPresenceRecord(key={"id": "A-1"}, values={})], [], ["id"]) == 0.0
