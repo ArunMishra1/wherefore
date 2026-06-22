@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/logo.png" alt="wherefore logo" width="280">
+  <img src="https://raw.githubusercontent.com/tracelore/wherefore/main/assets/logo.png" alt="wherefore logo" width="280">
 </p>
 
 # wherefore
