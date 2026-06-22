@@ -31,6 +31,7 @@ instead; come back here for the "why" behind any specific decision.
 - [Database connectivity: SQLite built](#database-connectivity-sqlite-built-postgresmysql-deliberately-deferred)
 - [PostgreSQL: built and verified against a real server](#postgresql-built-and-verified-against-a-real-postgres-server-not-mocked)
 - [Documentation: ARCHITECTURE.md and troubleshooting.md](#documentation-architecturemd-and-troubleshootingmd-added)
+- [compare-dir database batch mode](#compare-dir-database-batch-mode-db-vs-db)
 
 ---
 
@@ -1276,3 +1277,99 @@ actually do instead:
   `load_csv(encoding=...)` parameter is real, but cli.py never exposes
   it as an option) -- fixed by documenting the actual gap honestly
   instead of describing a feature that doesn't exist.
+
+## compare-dir database batch mode: db://* vs db://*
+
+The real design pass ARCHITECTURE.md's own "things that look like one
+thing but are another" section explicitly flagged as not-yet-done.
+Picked over MySQL connectivity after weighing both directly with the
+user: MySQL is the third backend behind two that already cover the
+large majority of real workloads, while batch comparison was the gap
+real users hit immediately doing the exact workflow this tool exists
+for -- a real migration involves checking dozens of tables, and that
+was completely unsolved for databases specifically, the one source
+type where "many tables" is the NORMAL case, not file-based
+`compare-dir`'s occasional one.
+
+**New: `comparison/db.py:list_tables`.** The database-batch-mode
+equivalent of `_match_files_by_name`'s "give me every real comparable
+unit on this side." Confirmed by direct testing this needs real
+filtering on BOTH backends, not "select everything":
+- SQLite: `sqlite_master` lists tables AND views together with no
+  single-column way to ask for tables only -- filters `type='table'`.
+  ALSO excludes `sqlite_%`-prefixed names -- confirmed directly that
+  declaring an `AUTOINCREMENT` column auto-creates an internal
+  `sqlite_sequence` bookkeeping table, which would otherwise get
+  "compared" as if it were real user data.
+- PostgreSQL: `information_schema.tables` lists tables, views, AND
+  system-schema objects together -- filters `table_schema = 'public'`
+  AND `table_type = 'BASE TABLE'`, confirmed against a real Postgres
+  server (via py-pglite) that this correctly excludes a real
+  `CREATE VIEW` without extra handling.
+
+**`compare_dir`'s real refactor, not just a bolted-on branch.** Read
+the existing function fully before touching it: the per-pair loop body
+(load -> `_run_comparison` -> render -> write) was ALREADY completely
+source-agnostic -- only `_match_files_by_name` and the two
+`load_file()` calls were genuinely file-specific. Extracted a shared
+4-tuple pair shape (`source_ref, target_ref, pair_label, report_stem`)
+so both the file-mode and new database-mode branches feed the same
+loop, rather than duplicating the comparison logic twice. `pair_label`
+(terminal display) and `report_stem` (report filename) are tracked as
+TWO separate values, not one -- confirmed by a real regression caught
+by the existing test suite mid-refactor: an early draft collapsed them
+into one (`src.stem`), which silently changed terminal output from
+"accounts.csv" to "accounts", breaking
+`test_compare_dir_finds_and_compares_all_matching_pairs`'s existing
+assertion. Caught immediately by running the full suite after the
+refactor, not assumed safe.
+
+**Primary-key confirmation, designed deliberately for batch shape, not
+copy-pasted from compare()'s single-table version.** N separate
+per-table prompts in a 20-table batch would defeat batch mode's whole
+purpose; silently skipping confirmation would defeat the
+confirmation's whole purpose (see `_confirm_db_primary_key`'s own
+docstring on why this check exists for databases, not files). Resolved
+with ONE combined prompt: every table's primary key (or lack of one,
+or a composite-key warning) is detected and listed up front, then a
+single yes/no covers the whole batch. A table with no usable key (none
+found, or composite) is skipped INDIVIDUALLY afterward -- same "skip,
+don't abort" principle the file-based mode already uses for an
+unrecognized format -- not a reason to decline the whole batch.
+
+**Explicit `--key` behavior fell out of the existing architecture for
+free, confirmed by direct testing rather than assumed:** passing
+`--key` applies it to every table (matching the file-based mode's
+documented "applied to every pair" semantics) and skips detection/
+confirmation entirely. A table where that column doesn't exist on
+both sides is skipped individually via `_run_comparison`'s existing,
+UNMODIFIED `ValueError` handling -- no special-casing needed for this
+at all, it just worked once the shared loop was wired up correctly.
+
+**Scope boundary, decided deliberately, not deferred without a
+decision:** mixing one directory with one `db://*` is rejected with a
+clear, specific error rather than guessed at. Pairing a table name
+against a filename isn't symmetric the way two directories or two
+databases are (should "accounts.csv" match table "accounts"? what
+about "accounts_2024.csv"?) -- this is real, tracked future work
+requiring its own design pass, not silently mishandled.
+
+**Tests:** 8 new tests in `test_db.py` for `list_tables` (basic
+happy path, view exclusion on both backends confirmed against a real
+Postgres server, SQLite's internal-table exclusion, sort order) plus 9
+new CLI-level tests in `test_cli.py` (full batch flow, report
+filenames, `--yes`, decline-and-abort, no-PK-table skip-not-fatal,
+explicit `--key` applying to every table, no-matching-tables error,
+missing-conn-env error, and the mixed-source rejection) -- all against
+real on-disk SQLite databases via `CliRunner`, the same standard every
+other CLI test in this project holds.
+
+369 -> 385 tests passing.
+
+**Not built, deliberately:** mixed directory+database batch
+comparison (see scope boundary above); MySQL connectivity (unchanged,
+still a real, tracked gap, deliberately deprioritized behind this in
+favor of the gap users hit more directly); multi-schema support for
+PostgreSQL's `list_tables` (only the `public` schema is searched,
+matching this project's existing v1-simplicity precedent rather than
+guessing at a need nobody's asked for yet).

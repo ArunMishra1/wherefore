@@ -19,6 +19,7 @@ from wherefore.comparison.db import (
     connect,
     detect_primary_key,
     list_columns,
+    list_tables,
     parse_connection_string,
     query_table,
 )
@@ -268,6 +269,52 @@ def test_list_columns_raises_for_nonexistent_table(sqlite_conn):
         list_columns(sqlite_conn, "no_such_table")
 
 
+def test_list_tables_returns_real_user_tables(sqlite_conn):
+    """The `accounts` fixture table should be there; confirms the
+    basic happy path before testing the trickier exclusion cases
+    below."""
+    assert "accounts" in list_tables(sqlite_conn)
+
+
+def test_list_tables_excludes_views(sqlite_conn):
+    """
+    Regression test for a real distinction confirmed by direct
+    testing before writing list_tables: sqlite_master lists tables AND
+    views together with no single-column way to ask for tables only --
+    a view must be explicitly filtered out via type='table', or batch
+    mode would try to "compare" a view as if it were a real,
+    independently-writable table.
+    """
+    sqlite_conn.execute("CREATE VIEW accounts_view AS SELECT * FROM accounts")
+    sqlite_conn.commit()
+    tables = list_tables(sqlite_conn)
+    assert "accounts_view" not in tables
+    assert "accounts" in tables
+
+
+def test_list_tables_excludes_sqlite_internal_tables(sqlite_conn):
+    """
+    Regression test for a real, confirmed SQLite behavior: declaring
+    an AUTOINCREMENT column auto-creates an internal sqlite_sequence
+    bookkeeping table -- without filtering 'sqlite_%' names out, batch
+    mode would try to "compare" SQLite's own internal bookkeeping as
+    if it were real user data.
+    """
+    sqlite_conn.execute("CREATE TABLE autoinc_test (id INTEGER PRIMARY KEY AUTOINCREMENT, val TEXT)")
+    sqlite_conn.commit()
+    tables = list_tables(sqlite_conn)
+    assert not any(t.startswith("sqlite_") for t in tables)
+    assert "autoinc_test" in tables
+
+
+def test_list_tables_returns_sorted_names(sqlite_conn):
+    sqlite_conn.execute("CREATE TABLE zzz_last (id TEXT)")
+    sqlite_conn.execute("CREATE TABLE aaa_first (id TEXT)")
+    sqlite_conn.commit()
+    tables = list_tables(sqlite_conn)
+    assert tables == sorted(tables)
+
+
 def test_detect_primary_key_single_column(sqlite_conn):
     assert detect_primary_key(sqlite_conn, "accounts") == ["account_id"]
 
@@ -483,6 +530,40 @@ def test_postgres_list_columns_returns_real_schema_order(pg_conn):
 def test_postgres_list_columns_raises_for_nonexistent_table(pg_conn):
     with pytest.raises(ValueError, match="not found"):
         list_columns(pg_conn, "this_table_does_not_exist_at_all")
+
+
+def test_postgres_list_tables_returns_real_user_tables(pg_conn):
+    cur = pg_conn.cursor()
+    cur.execute("CREATE TABLE list_tables_basic_test (id TEXT PRIMARY KEY)")
+    pg_conn.commit()
+    assert "list_tables_basic_test" in list_tables(pg_conn)
+
+
+def test_postgres_list_tables_excludes_views(pg_conn):
+    """
+    Regression test for a real distinction confirmed by direct testing
+    against a real Postgres server before writing list_tables'
+    Postgres branch: information_schema.tables lists views alongside
+    real tables -- table_type = 'BASE TABLE' must filter them out, or
+    batch mode would try to "compare" a view as if it were an
+    independently-writable table.
+    """
+    cur = pg_conn.cursor()
+    cur.execute("CREATE TABLE view_source_test (id TEXT PRIMARY KEY)")
+    cur.execute("CREATE VIEW view_source_test_view AS SELECT * FROM view_source_test")
+    pg_conn.commit()
+    tables = list_tables(pg_conn)
+    assert "view_source_test_view" not in tables
+    assert "view_source_test" in tables
+
+
+def test_postgres_list_tables_returns_sorted_names(pg_conn):
+    cur = pg_conn.cursor()
+    cur.execute("CREATE TABLE zzz_sort_test (id TEXT)")
+    cur.execute("CREATE TABLE aaa_sort_test (id TEXT)")
+    pg_conn.commit()
+    tables = list_tables(pg_conn)
+    assert tables == sorted(tables)
 
 
 def test_postgres_detect_primary_key_single_column(pg_conn):

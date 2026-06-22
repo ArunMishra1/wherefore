@@ -206,6 +206,37 @@ This is the one safety check standing between a wrong guess and a
 query running against a real database unreviewed — skip it
 deliberately, not by accident.
 
+### `compare-dir db://* db://*` says "mixing a database with a directory of files is not supported"
+
+This is a real, current scope boundary, not a bug — pairing a table
+name against a filename isn't a well-defined matching rule yet. Both
+sides of `compare-dir` need to be the same kind: two directories, or
+`db://*` on both sides. Comparing one database table against one file
+works fine through the single-pair `compare` command instead:
+
+```bash
+wherefore compare db://accounts old_export.csv --source-conn-env SOURCE_DB --key account_id
+```
+
+### `compare-dir db://* db://*` skips a table I expected to be compared
+
+Check the per-table line in the output — a table is skipped
+individually (not aborting the rest of the batch) for the same reasons
+a single `compare` run would fail: no usable primary key was detected
+on at least one side and no `--key` was given, or a composite
+(multi-column) key was found (not yet usable as a join key in batch
+mode — same limitation as the single-table case above). Pass `--key`
+with a single column name to apply it to every table in the batch if
+this happens a lot.
+
+### `No matching table names found between the source and target databases`
+
+`compare-dir`'s database mode only compares tables present in **both**
+databases by exact name — same principle as the file-based mode only
+pairing identical filenames. If your migration renamed every table,
+there's nothing for name-matching to find; compare individual
+renamed pairs with `compare` instead.
+
 ---
 
 ## S3

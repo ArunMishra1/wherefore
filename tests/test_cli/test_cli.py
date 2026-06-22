@@ -574,6 +574,256 @@ def test_compare_dir_aggregates_redaction_categories_across_pairs(tmp_path, monk
     assert "Redacted before sending to Claude (across all pairs): email" in result.output
 
 
+# --- compare-dir database batch mode (db://* on both sides) ---
+# Real end-to-end tests against real, on-disk SQLite databases -- same
+# standard the single-table db:// tests in test_db.py and the earlier
+# compare() CLI tests hold.
+
+
+def _make_two_table_sqlite_db(path, accounts_mismatch_at=None, include_no_pk_table=False):
+    """Creates a real SQLite database with an `accounts` table (PK:
+    account_id) and an `orders` table (PK: order_id), optionally with
+    one balance mismatch injected and/or a third table with no primary
+    key -- enough real variety to exercise batch mode's per-table
+    detection and skip-on-failure behavior."""
+    import sqlite3
+
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE accounts (account_id TEXT PRIMARY KEY, balance REAL)")
+    conn.execute("CREATE TABLE orders (order_id TEXT PRIMARY KEY, total REAL)")
+    for i in range(5):
+        offset = 99.0 if i == accounts_mismatch_at else 0.0
+        conn.execute("INSERT INTO accounts VALUES (?, ?)", (f"ACCT-{i}", 100.0 + i + offset))
+        conn.execute("INSERT INTO orders VALUES (?, ?)", (f"ORD-{i}", 50.0 + i))
+    if include_no_pk_table:
+        conn.execute("CREATE TABLE widgets (a TEXT, b REAL)")
+        conn.execute("INSERT INTO widgets VALUES ('x', 1.0)")
+    conn.commit()
+    conn.close()
+
+
+def test_compare_dir_db_mode_finds_and_compares_all_matching_tables(tmp_path, monkeypatch):
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_two_table_sqlite_db(src_db)
+    _make_two_table_sqlite_db(tgt_db, accounts_mismatch_at=2)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare-dir", "db://*", "db://*",
+            "--source-conn-env", "SOURCE_DB", "--target-conn-env", "TARGET_DB",
+            "--output-dir", str(tmp_path / "reports"),
+        ],
+        input="y\n",
+    )
+
+    assert result.exit_code == 0
+    assert "Found 2 matching table pair(s)" in result.output
+    assert "detected primary key 'account_id'" in result.output
+    assert "detected primary key 'order_id'" in result.output
+    assert "[DIFF] accounts" in result.output
+    assert "[OK] orders: no mismatches" in result.output
+    assert "Done: 2 compared, 0 skipped" in result.output
+
+
+def test_compare_dir_db_mode_writes_one_report_per_table(tmp_path, monkeypatch):
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_two_table_sqlite_db(src_db)
+    _make_two_table_sqlite_db(tgt_db)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    output_dir = tmp_path / "reports"
+    runner.invoke(
+        app,
+        [
+            "compare-dir", "db://*", "db://*",
+            "--source-conn-env", "SOURCE_DB", "--target-conn-env", "TARGET_DB",
+            "--output-dir", str(output_dir),
+        ],
+        input="y\n",
+    )
+
+    assert (output_dir / "accounts_report.md").exists()
+    assert (output_dir / "orders_report.md").exists()
+    assert "db://accounts" in (output_dir / "accounts_report.md").read_text()
+
+
+def test_compare_dir_db_mode_yes_flag_skips_interactive_prompt(tmp_path, monkeypatch):
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_two_table_sqlite_db(src_db)
+    _make_two_table_sqlite_db(tgt_db)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare-dir", "db://*", "db://*",
+            "--source-conn-env", "SOURCE_DB", "--target-conn-env", "TARGET_DB",
+            "--output-dir", str(tmp_path / "reports"),
+            "--yes",
+        ],
+        # No input provided -- if --yes didn't actually skip the
+        # prompt, this would fail/hang rather than silently pass.
+    )
+    assert result.exit_code == 0
+    assert "proceeding without interactive confirmation" in result.output
+
+
+def test_compare_dir_db_mode_declining_confirmation_aborts_cleanly(tmp_path, monkeypatch):
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_two_table_sqlite_db(src_db)
+    _make_two_table_sqlite_db(tgt_db)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    output_dir = tmp_path / "reports"
+    result = runner.invoke(
+        app,
+        [
+            "compare-dir", "db://*", "db://*",
+            "--source-conn-env", "SOURCE_DB", "--target-conn-env", "TARGET_DB",
+            "--output-dir", str(output_dir),
+        ],
+        input="n\n",
+    )
+    assert result.exit_code == 1
+    assert "Aborted" in result.output
+    assert not (output_dir / "accounts_report.md").exists()
+
+
+def test_compare_dir_db_mode_table_with_no_primary_key_is_skipped_not_fatal(tmp_path, monkeypatch):
+    """
+    The real "skip one pair, don't abort the batch" principle applied
+    to database batch mode: a table missing a usable primary key
+    should be reported and skipped individually, with the other real
+    tables still comparing successfully.
+    """
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_two_table_sqlite_db(src_db, include_no_pk_table=True)
+    _make_two_table_sqlite_db(tgt_db, include_no_pk_table=True)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare-dir", "db://*", "db://*",
+            "--source-conn-env", "SOURCE_DB", "--target-conn-env", "TARGET_DB",
+            "--output-dir", str(tmp_path / "reports"),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 0
+    assert "no primary key found on at least one side" in result.output
+    assert "[SKIPPED] widgets" in result.output
+    assert "Done: 2 compared, 1 skipped" in result.output
+
+
+def test_compare_dir_db_mode_explicit_key_applies_to_every_table(tmp_path, monkeypatch):
+    """
+    --key should apply to every table in the batch, matching the
+    file-based mode's own documented "applied to every pair"
+    semantics -- and skip detection/confirmation entirely. A table
+    where the given column doesn't exist is skipped individually
+    (existing _run_comparison ValueError handling, unmodified), not a
+    reason to abort.
+    """
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    _make_two_table_sqlite_db(src_db, include_no_pk_table=True)
+    _make_two_table_sqlite_db(tgt_db, include_no_pk_table=True)
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare-dir", "db://*", "db://*",
+            "--source-conn-env", "SOURCE_DB", "--target-conn-env", "TARGET_DB",
+            "--output-dir", str(tmp_path / "reports"),
+            "--key", "a",
+        ],
+        # No input -- explicit --key must skip the confirmation prompt
+        # entirely, same as compare()'s single-table path.
+    )
+    assert result.exit_code == 0
+    assert "Proceed comparing" not in result.output
+    assert "[OK] widgets" in result.output
+    assert "[SKIPPED] accounts" in result.output
+    assert "[SKIPPED] orders" in result.output
+
+
+def test_compare_dir_db_mode_no_matching_tables_exits_with_error(tmp_path, monkeypatch):
+    src_db = tmp_path / "source.sqlite"
+    tgt_db = tmp_path / "target.sqlite"
+    import sqlite3
+
+    conn1 = sqlite3.connect(str(src_db))
+    conn1.execute("CREATE TABLE only_in_source (id TEXT)")
+    conn1.commit()
+    conn1.close()
+
+    conn2 = sqlite3.connect(str(tgt_db))
+    conn2.execute("CREATE TABLE only_in_target (id TEXT)")
+    conn2.commit()
+    conn2.close()
+
+    monkeypatch.setenv("SOURCE_DB", f"sqlite:///{src_db}")
+    monkeypatch.setenv("TARGET_DB", f"sqlite:///{tgt_db}")
+
+    result = runner.invoke(
+        app,
+        [
+            "compare-dir", "db://*", "db://*",
+            "--source-conn-env", "SOURCE_DB", "--target-conn-env", "TARGET_DB",
+            "--output-dir", str(tmp_path / "reports"),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "No matching table names found" in result.output
+
+
+def test_compare_dir_db_mode_missing_conn_env_flags_gives_clear_error(tmp_path):
+    result = runner.invoke(
+        app,
+        ["compare-dir", "db://*", "db://*", "--output-dir", str(tmp_path / "reports")],
+    )
+    assert result.exit_code == 1
+    assert "--source-conn-env" in result.output
+
+
+def test_compare_dir_rejects_mixing_database_and_directory_sources(tmp_path):
+    """
+    Confirmed deliberate scope boundary: pairing a table name against
+    a filename isn't a well-defined matching rule, so this must be
+    rejected with a clear error, not guessed at silently.
+    """
+    a_real_dir = tmp_path / "some_files"
+    a_real_dir.mkdir()
+
+    result = runner.invoke(
+        app,
+        ["compare-dir", "db://*", str(a_real_dir), "--output-dir", str(tmp_path / "reports")],
+    )
+    assert result.exit_code == 1
+    assert "mixing a database" in result.output.lower()
+
+
 @pytest.fixture
 def mock_s3_with_csv_pair(monkeypatch):
     """

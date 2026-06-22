@@ -185,10 +185,16 @@ waste time.
   `connect()`/`query_table()`/etc. all raise a clear `NotImplementedError`
   for it. The connection-string *format* is generic across all three
   backends; the actual connectivity code is not.
-- **`compare-dir` does not support `db://` sources.** It's genuinely
-  directory/filesystem-based (`_match_files_by_name`, real
-  `Path.is_dir()` checks) — bolting database sources onto it wasn't
-  done without a real design pass of its own, and hasn't happened yet.
+- **`compare-dir` now supports `db://*` batch mode (database vs
+  database), but NOT mixed sources (one side a directory, the other a
+  database).** The real design pass this previously needed (see the
+  build log for the specifics) concluded: two databases can be paired
+  by table name the same way two directories are paired by filename
+  (`list_tables` + intersection, mirroring `_match_files_by_name`
+  exactly), so that case was built. Mixing a directory with a database
+  was deliberately left unsolved and rejected with a clear error
+  rather than guessed at — pairing a table name against a filename
+  isn't symmetric the way two directories or two databases are.
 
 ## Key design decisions and why
 

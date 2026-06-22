@@ -407,6 +407,65 @@ def list_columns(conn, table_name: str) -> list[str]:
     )
 
 
+def list_tables(conn) -> list[str]:
+    """
+    Returns every real, user-created table name in the database, in
+    name order -- used by cli.py's compare_dir for the database-vs-
+    database batch mode (db:// vs db://), the same role
+    _match_files_by_name plays for two directories: "give me every
+    real comparable unit on this side, so I can intersect with the
+    other side."
+
+    Deliberately excludes views and internal/system bookkeeping
+    objects on both backends -- confirmed by direct testing this needs
+    real filtering, not just "select everything":
+
+    SQLite: sqlite_master lists tables AND views together with no
+    built-in way to ask for tables only via a single column -- filters
+    on type='table' to exclude views, confirmed by direct testing.
+    ALSO excludes anything named 'sqlite_%' -- confirmed directly that
+    SQLite auto-creates an internal sqlite_sequence bookkeeping table
+    the moment any table uses AUTOINCREMENT, and 'sqlite_%' is
+    SQLite's own documented reserved-name prefix for exactly this kind
+    of internal object, not something specific to AUTOINCREMENT alone.
+
+    PostgreSQL: information_schema.tables lists tables, views, AND
+    objects from system schemas (pg_catalog, information_schema
+    itself) together -- filters on table_schema = 'public' (the
+    default schema real user tables live in) and table_type =
+    'BASE TABLE' (excluding views), confirmed by direct testing
+    against a real Postgres server that this correctly excludes a
+    real CREATE VIEW without needing it added to the filter manually.
+
+    NOTE: 'public' schema only -- a database using multiple custom
+    schemas would need more than this function offers today. Matches
+    this project's existing v1-simplicity precedent (e.g.
+    key_format_similarity's "only join_columns[0]" scope) rather than
+    guessing at multi-schema support nobody's asked for yet.
+    """
+    if isinstance(conn, sqlite3.Connection):
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        return [row[0] for row in rows]
+
+    import psycopg2
+
+    if isinstance(conn, psycopg2.extensions.connection):
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT table_name FROM information_schema.tables "
+            "WHERE table_schema = 'public' AND table_type = 'BASE TABLE' "
+            "ORDER BY table_name"
+        )
+        return [row[0] for row in cur.fetchall()]
+
+    raise NotImplementedError(
+        "list_tables is only implemented for SQLite and PostgreSQL connections."
+    )
+
+
 def detect_primary_key(conn, table_name: str) -> list[str] | None:
     """
     Returns the real primary key column(s) for `table_name`, reading

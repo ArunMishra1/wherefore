@@ -38,6 +38,7 @@ from wherefore.comparison.db import (
     _table_name_from_db_source,
     connect as db_connect,
     detect_primary_key,
+    list_tables,
     parse_connection_string,
     query_table,
 )
@@ -460,10 +461,14 @@ def compare(
 
 @app.command(name="compare-dir")
 def compare_dir(
-    source_dir: str = typer.Argument(..., help="Directory of source files."),
-    target_dir: str = typer.Argument(..., help="Directory of target files with matching filenames."),
+    source_dir: str = typer.Argument(
+        ..., help="Directory of source files, or db://* to compare every table in a database."
+    ),
+    target_dir: str = typer.Argument(
+        ..., help="Directory of target files with matching filenames, or db://* for the target database."
+    ),
     output_dir: str = typer.Option(
-        "reports", "--output-dir", help="Directory to write one report per matched file pair."
+        "reports", "--output-dir", help="Directory to write one report per matched pair."
     ),
     key: str = typer.Option(
         None, "--key", help="Join key column name, applied to every pair. If omitted, auto-detected per pair."
@@ -476,29 +481,83 @@ def compare_dir(
         False, "--explain", help="Call the real Claude API for every pair with mismatches. Requires ANTHROPIC_API_KEY."
     ),
     no_redact: bool = typer.Option(False, "--no-redact", help="Disable redaction for all pairs."),
+    source_conn_env: str = typer.Option(
+        None,
+        "--source-conn-env",
+        help="Required if SOURCE_DIR is db://*: the NAME of an environment variable holding the real "
+        "connection string. Never the connection string itself.",
+    ),
+    target_conn_env: str = typer.Option(
+        None,
+        "--target-conn-env",
+        help="Same as --source-conn-env, for TARGET_DIR.",
+    ),
+    assume_yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Skip the interactive confirmation prompt for auto-detected database primary keys "
+        "(db:// batch mode only; has no effect on file-based directories).",
+    ),
 ) -> None:
     """
-    Compare every matching file pair across two directories -- the
-    real-world shape of a migration audit, where you're checking dozens
-    of tables, not one. Files are matched by IDENTICAL FILENAME between
-    source_dir and target_dir (e.g. source_dir/accounts.csv pairs with
-    target_dir/accounts.csv) -- the same mental model as "same table,
-    same name, different environment," and deliberately simple: no
-    fuzzy filename matching, since guessing wrong at the FILE level
-    (comparing the wrong two tables) is a much worse mistake than
-    guessing wrong at the row-key level, which already has its own
-    careful, opt-in fuzzy-matching path (--fuzzy-keys).
+    Compare every matching pair across two sources -- the real-world
+    shape of a migration audit, where you're checking dozens of
+    tables, not one. Two source-pair shapes are supported, matched the
+    SAME way on both sides (mixing a directory with a database is not
+    supported -- see below for why):
+
+    Two directories: files matched by IDENTICAL FILENAME (e.g.
+    source_dir/accounts.csv pairs with target_dir/accounts.csv) -- the
+    same mental model as "same table, same name, different
+    environment," and deliberately simple: no fuzzy filename matching,
+    since guessing wrong at the FILE level (comparing the wrong two
+    tables) is a much worse mistake than guessing wrong at the
+    row-key level, which already has its own careful, opt-in
+    fuzzy-matching path (--fuzzy-keys).
+
+    Two databases (db://* on both sides -- ANY db://... string works,
+    since whatever follows db:// is ignored in this mode; db://* is
+    just the documented convention for "I mean every table," not a
+    literal requirement enforced anywhere): every real, user-created
+    table present in BOTH databases is compared, matched by identical
+    table name -- the same "match by name, exclude what's only on one
+    side" principle as the directory case, just reading the table list
+    from each database's own schema instead of a directory listing.
+    Requires --source-conn-env/--target-conn-env (see compare's own
+    docstring for why the connection string itself is never a CLI
+    argument). Every detected primary key is shown ONCE, as a combined
+    list covering the whole batch, with a single confirmation prompt
+    -- not one prompt per table, which would defeat the purpose of
+    batch mode, but also not silent, which would defeat the purpose of
+    the confirmation existing at all. A table with no detectable
+    primary key and no explicit --key is skipped individually (same
+    "skip, don't abort the batch" principle the file-based mode
+    already uses for an unrecognized file format), not treated as a
+    reason to stop everything.
+
+    Mixing a directory with a database (one side db://, the other a
+    file path) is explicitly rejected with a clear error rather than
+    guessed at -- pairing a table name against a filename isn't
+    symmetric the way two directories or two databases are (e.g.
+    should "accounts.csv" match table "accounts"? what about
+    "accounts_2024.csv"?), and this needs its own real design pass,
+    not a guess bolted onto this command's two already-working modes.
 
     Writes one report per pair into output_dir (named after the
-    source file), plus a one-line summary per pair to the terminal,
-    and a final tally. A failure on one pair (e.g. unrecognized file
-    format, no detectable key) is reported and skipped -- it does NOT
-    abort the whole batch, since the entire point of this command is
-    surviving a large, messy real-world directory where a handful of
-    files might not compare cleanly.
+    source file's stem, or the table name for database mode), plus a
+    one-line summary per pair to the terminal, and a final tally. A
+    failure on one pair (e.g. unrecognized file format, no detectable
+    key) is reported and skipped -- it does NOT abort the whole batch,
+    since the entire point of this command is surviving a large,
+    messy real-world source where a handful of pairs might not compare
+    cleanly.
 
     Example:
         wherefore compare-dir old_exports/ new_exports/ --output-dir reports/
+        export SOURCE_DB="postgresql://user:pass@host/old_db"
+        export TARGET_DB="postgresql://user:pass@host/new_db"
+        wherefore compare-dir db://* db://* --source-conn-env SOURCE_DB --target-conn-env TARGET_DB
     """
     if explain_flag and not os.environ.get("ANTHROPIC_API_KEY"):
         typer.secho(
@@ -509,19 +568,15 @@ def compare_dir(
         )
         raise typer.Exit(code=1)
 
-    source_path = Path(source_dir)
-    target_path = Path(target_dir)
-    if not source_path.is_dir():
-        typer.secho(f"Error: {source_dir!r} is not a directory.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
-    if not target_path.is_dir():
-        typer.secho(f"Error: {target_dir!r} is not a directory.", fg=typer.colors.RED, err=True)
-        raise typer.Exit(code=1)
+    source_is_db = _is_db_source(source_dir)
+    target_is_db = _is_db_source(target_dir)
 
-    pairs = _match_files_by_name(source_path, target_path)
-    if not pairs:
+    if source_is_db != target_is_db:
         typer.secho(
-            f"No matching filenames found between {source_dir!r} and {target_dir!r}.",
+            "Error: mixing a database (db://*) with a directory of files is not supported for "
+            "compare-dir. Both SOURCE_DIR and TARGET_DIR must be the same kind (both directories, "
+            "or both db://*) -- pairing a table name against a filename isn't a well-defined "
+            "matching rule yet (this is real, tracked future work, not a silent gap).",
             fg=typer.colors.RED,
             err=True,
         )
@@ -530,26 +585,74 @@ def compare_dir(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    typer.echo(f"Found {len(pairs)} matching file pair(s). Comparing...")
+    if source_is_db:
+        pairs, per_pair_key = _prepare_db_dir_pairs(
+            source_dir, target_dir, source_conn_env, target_conn_env, key, assume_yes
+        )
+    else:
+        source_path = Path(source_dir)
+        target_path = Path(target_dir)
+        if not source_path.is_dir():
+            typer.secho(f"Error: {source_dir!r} is not a directory.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+        if not target_path.is_dir():
+            typer.secho(f"Error: {target_dir!r} is not a directory.", fg=typer.colors.RED, err=True)
+            raise typer.Exit(code=1)
+
+        file_pairs = _match_files_by_name(source_path, target_path)
+        if not file_pairs:
+            typer.secho(
+                f"No matching filenames found between {source_dir!r} and {target_dir!r}.",
+                fg=typer.colors.RED,
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        # pair_label is the full filename (e.g. "accounts.csv") for
+        # terminal display, matching this command's original behavior
+        # -- NOT the same as the report filename, which uses just the
+        # stem (e.g. "accounts_report.md", no ".csv" in the middle).
+        # report_stem is tracked separately so fixing this distinction
+        # doesn't require re-deriving it from pair_label later via
+        # string splitting.
+        pairs = [
+            (str(src), str(tgt), src.name, src.stem) for src, tgt in file_pairs
+        ]
+        per_pair_key = {label: key for _, _, label, _ in pairs}
+
+    noun = "table" if source_is_db else "file"
+    typer.echo(f"Found {len(pairs)} matching {noun} pair(s). Comparing...")
     typer.echo()
 
     succeeded = 0
     failed = 0
     all_redaction_categories: set[str] = set()
 
-    for source_file, target_file in pairs:
-        pair_label = source_file.name
+    for source_ref, target_ref, pair_label, report_stem in pairs:
         try:
-            source_df = load_file(str(source_file))
-            target_df = load_file(str(target_file))
-        except (FileNotFoundError, ValueError, UnicodeDecodeError, RuntimeError, ImportError) as e:
-            typer.secho(f"  [SKIPPED] {pair_label}: error loading files: {e}", fg=typer.colors.RED)
+            if source_is_db:
+                source_df = _load_source(source_ref, source_conn_env, "source")
+                target_df = _load_source(target_ref, target_conn_env, "target")
+            else:
+                source_df = load_file(source_ref)
+                target_df = load_file(target_ref)
+        except (FileNotFoundError, ValueError, UnicodeDecodeError, RuntimeError, ImportError, NotImplementedError) as e:
+            typer.secho(f"  [SKIPPED] {pair_label}: error loading data: {e}", fg=typer.colors.RED)
+            failed += 1
+            continue
+
+        pair_key = per_pair_key.get(pair_label)
+        if source_is_db and pair_key is None:
+            typer.secho(
+                f"  [SKIPPED] {pair_label}: no usable primary key (no single-column key detected, "
+                "and no --key given).",
+                fg=typer.colors.RED,
+            )
             failed += 1
             continue
 
         try:
             result = _run_comparison(
-                source_df, target_df, key, fuzzy_keys, confidence_threshold, explain_flag, no_redact
+                source_df, target_df, pair_key, fuzzy_keys, confidence_threshold, explain_flag, no_redact
             )
         except ValueError as e:
             typer.secho(f"  [SKIPPED] {pair_label}: {e}", fg=typer.colors.RED)
@@ -559,11 +662,11 @@ def compare_dir(
         all_redaction_categories.update(result.redaction_categories)
 
         report = _render_report(
-            str(source_file), str(target_file), result.join_column,
+            source_ref, target_ref, result.join_column,
             result.diff_result, result.clusters, result.explanations,
             row_presence_clusters=result.row_presence_clusters,
         )
-        report_path = output_path / f"{source_file.stem}_report.md"
+        report_path = output_path / f"{report_stem}_report.md"
         report_path.write_text(report)
 
         total_findings = len(result.clusters) + len(result.row_presence_clusters)
@@ -587,6 +690,157 @@ def compare_dir(
             fg=typer.colors.YELLOW,
         )
     typer.secho(f"Done: {succeeded} compared, {failed} skipped. Reports written to {output_dir}/", fg=typer.colors.GREEN)
+
+
+def _prepare_db_dir_pairs(
+    source_dir: str,
+    target_dir: str,
+    source_conn_env: str | None,
+    target_conn_env: str | None,
+    explicit_key: str | None,
+    assume_yes: bool,
+) -> tuple[list[tuple[str, str, str, str]], dict[str, str | None]]:
+    """
+    The database-batch-mode equivalent of _match_files_by_name --
+    connects to both databases, lists every real table on each side
+    (db.py's list_tables), and intersects by name, the same "match by
+    identical name, exclude what's only on one side" principle as the
+    file-based version (see compare_dir's docstring).
+
+    UNLIKE the file-based path, this also handles primary-key
+    detection/confirmation for the WHOLE BATCH up front, in one
+    combined prompt -- not because the underlying mechanism differs
+    from compare()'s single-table _detect_db_primary_keys/
+    _confirm_db_primary_key (it's the same schema introspection), but
+    because showing N separate per-table prompts in a batch of,
+    say, 20 tables would defeat the entire purpose of batch mode,
+    while skipping confirmation silently would defeat the entire
+    purpose of the confirmation existing at all (see
+    _confirm_db_primary_key's own docstring for why this safety check
+    exists specifically for databases, not files).
+
+    Returns (pairs, per_pair_key):
+    - pairs: list of (source_ref, target_ref, pair_label, report_stem)
+      tuples, where source_ref/target_ref are real db://table_name
+      strings ready to pass straight into _load_source. pair_label and
+      report_stem are identical here (both just the bare table name)
+      -- the two-value shape exists to match the file-based branch's
+      tuple shape exactly, where pair_label (full filename) and
+      report_stem (filename without extension) genuinely differ.
+    - per_pair_key: maps each pair_label to the join key that should
+      be used for that table -- the explicit --key if one was given
+      (applied to every table, matching the file-based mode's own
+      "applied to every pair" semantics), otherwise that table's own
+      detected single-column primary key, or None if no usable key
+      was found (the caller skips that one table, not the whole
+      batch -- same "skip, don't abort" principle as an unrecognized
+      file format).
+
+    Composite (multi-column) primary keys are reported in the
+    confirmation listing but, same as compare()'s single-table path,
+    are not yet usable as an actual join key -- that table's
+    per_pair_key entry is None, so it gets skipped individually with a
+    clear reason rather than guessed at.
+
+    Exits the whole command (not just one pair) if the user declines
+    the combined confirmation -- unlike a per-table loading error,
+    declining a confirmation that covers the WHOLE batch is a single
+    yes/no decision about whether to proceed at all, not a per-pair
+    outcome to skip past.
+    """
+    if not source_conn_env or not target_conn_env:
+        typer.secho(
+            "Error: db://* batch mode requires both --source-conn-env and --target-conn-env "
+            "(the NAME of an environment variable holding a real connection string, never the "
+            "connection string itself).",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        source_conn_str = os.environ[source_conn_env]
+        target_conn_str = os.environ[target_conn_env]
+    except KeyError as e:
+        typer.secho(
+            f"Error: environment variable {e.args[0]!r} is not set. It should hold a real "
+            "database connection string.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    try:
+        source_conn = db_connect(parse_connection_string(source_conn_str))
+        target_conn = db_connect(parse_connection_string(target_conn_str))
+        source_tables = set(list_tables(source_conn))
+        target_tables = set(list_tables(target_conn))
+    except (ValueError, FileNotFoundError, NotImplementedError, RuntimeError) as e:
+        typer.secho(f"Error connecting to database: {e}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1)
+
+    common_tables = sorted(source_tables & target_tables)
+    if not common_tables:
+        typer.secho(
+            "No matching table names found between the source and target databases.",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    per_pair_key: dict[str, str | None] = {}
+    if explicit_key:
+        # --key applies to every table, matching the file-based mode's
+        # own "applied to every pair" semantics -- skip detection
+        # entirely, same as compare()'s single-table path does.
+        for table in common_tables:
+            per_pair_key[table] = explicit_key
+    else:
+        typer.echo()
+        typer.echo(f"Detecting primary keys for {len(common_tables)} table(s)...")
+        for table in common_tables:
+            try:
+                source_pk = detect_primary_key(source_conn, table)
+                target_pk = detect_primary_key(target_conn, table)
+            except ValueError as e:
+                typer.secho(f"  {table}: error reading schema: {e}", fg=typer.colors.RED)
+                per_pair_key[table] = None
+                continue
+
+            # Both sides must agree on a usable single-column key --
+            # if either side has none, or either is composite, this
+            # table can't get an auto-applied key (reported, not
+            # guessed at -- see this function's docstring).
+            usable = (
+                source_pk is not None and len(source_pk) == 1
+                and target_pk is not None and len(target_pk) == 1
+            )
+            if source_pk is None or target_pk is None:
+                typer.secho(f"  {table}: no primary key found on at least one side.", fg=typer.colors.YELLOW)
+            elif len(source_pk) > 1 or len(target_pk) > 1:
+                typer.secho(
+                    f"  {table}: composite primary key detected ({', '.join(source_pk)}) -- "
+                    "not yet usable as a join key in batch mode.",
+                    fg=typer.colors.YELLOW,
+                )
+            else:
+                typer.secho(f"  {table}: detected primary key {source_pk[0]!r}.", fg=typer.colors.CYAN)
+
+            per_pair_key[table] = source_pk[0] if usable else None
+
+        typer.echo()
+        if assume_yes:
+            typer.echo("(--yes passed, proceeding without interactive confirmation)")
+        elif not typer.confirm(
+            f"Proceed comparing {len(common_tables)} table(s) with the keys shown above?", default=False
+        ):
+            typer.secho("Aborted.", fg=typer.colors.YELLOW)
+            raise typer.Exit(code=1)
+
+    pairs = [
+        (f"db://{table}", f"db://{table}", table, table) for table in common_tables
+    ]
+    return pairs, per_pair_key
 
 
 def _match_files_by_name(source_dir: Path, target_dir: Path) -> list[tuple[Path, Path]]:

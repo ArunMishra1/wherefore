@@ -1,7 +1,3 @@
-<p align="center">
-  <img src="https://raw.githubusercontent.com/tracelore/wherefore/main/assets/logo.png" alt="wherefore logo" width="280">
-</p>
-
 # wherefore
 
 **Tells you *why* two datasets differ — not just that they do.**
@@ -92,7 +88,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs everything, and runs the test suite
-(should show **369 passed**, no API key needed — the test suite uses a
+(should show **385 passed**, no API key needed — the test suite uses a
 fake AI provider, zero network calls). Safe to re-run.
 
 Works the same with `.csv`, `.json`, `.parquet`, or `.xlsx`/`.xls` —
@@ -179,11 +175,11 @@ statistical detection, AI explanation, and a scored eval harness.
 |---|---|
 | **Formats** | CSV, JSON, Parquet, Excel — local or `s3://`, auto-detected, mix-and-match |
 | **Database** | SQLite and PostgreSQL (`db://table_name` + `--source-conn-env`/`--target-conn-env`) — MySQL not yet |
-| **Modes** | One file pair (`compare`) or a whole directory (`compare-dir`) |
+| **Modes** | One pair (`compare`) or a whole batch (`compare-dir`) — files or databases |
 | **Taxonomy** | 8 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision`, `encoding_mismatch`, `dedup_failure`, `key_mismatch` |
 | **AI layer** | Verified against the real Claude API twice — manually and via the scored eval harness — 100% match on a small (seven-fixture) sample |
 | **Privacy** | Redacts emails/SSNs/cards/phones before any `--explain` call, on by default |
-| **Tests** | 369 passing, including a real (mocked) S3 round-trip, a real on-disk SQLite database, a real PostgreSQL server (via PGlite), and end-to-end runs against real generated files |
+| **Tests** | 385 passing, including a real (mocked) S3 round-trip, a real on-disk SQLite database, a real PostgreSQL server (via PGlite), and end-to-end runs against real generated files |
 
 `dedup_failure` and `key_mismatch` are structurally different from the
 other six — `dedup_failure` detects duplicated rows (re-inserted with
@@ -434,6 +430,39 @@ wrong about a row key. A pair that can't be compared (bad format, no
 detectable key) is skipped and reported, not fatal to the rest of the
 batch. Every `compare` flag works here too, applied to every pair.
 
+`compare-dir` also works against two whole **databases** — pass
+`db://*` on both sides instead of two directories, and every table
+present in both gets compared:
+
+```bash
+$ export SOURCE_DB="postgresql://user:pass@host/old_db"
+$ export TARGET_DB="postgresql://user:pass@host/new_db"
+$ wherefore compare-dir db://* db://* --source-conn-env SOURCE_DB --target-conn-env TARGET_DB
+
+Detecting primary keys for 2 table(s)...
+  accounts: detected primary key 'account_id'.
+  orders: detected primary key 'order_id'.
+
+Proceed comparing 2 table(s) with the keys shown above? [y/N]: y
+Found 2 matching table pair(s). Comparing...
+
+  [DIFF] accounts: 1 finding(s) (timezone_shift)
+  [OK] orders: no mismatches
+
+Done: 2 compared, 0 skipped. Reports written to reports/
+```
+
+Every table's primary key is detected from the database's own schema
+and shown **once**, as a combined list, with a single confirmation for
+the whole batch — not one prompt per table (which would defeat the
+point of batch mode) and not silent (which would defeat the point of
+the confirmation existing at all). `--yes` skips it for scripted use; a
+table with no usable key is skipped individually, not fatal to the
+batch. Mixing a directory with a database (one side a folder, the
+other `db://*`) isn't supported yet — pairing a table name against a
+filename isn't a well-defined rule, and gets its own clear error
+rather than a guess.
+
 ### What you get without an API key
 
 Real diffing, real grouping, real pattern matching — and a confidence
@@ -491,8 +520,13 @@ wherefore compare SOURCE TARGET [OPTIONS]
 
 wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
 
+  (SOURCE_DIR/TARGET_DIR can be two directories, or db://* on both sides)
   --output-dir TEXT             Directory for one report per pair (default: reports).
   --key, --fuzzy-keys, --confidence-threshold, --explain, --no-redact   Same as `compare`, applied to every pair.
+  --source-conn-env TEXT        Required if using db://* batch mode. Same as compare's flag.
+  --target-conn-env TEXT        Same as --source-conn-env, for the target database.
+  --yes / -y                    Skip the single combined confirmation prompt for the whole batch's
+                                 auto-detected primary keys (db://* batch mode only).
 ```
 </details>
 
