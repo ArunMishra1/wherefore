@@ -530,6 +530,30 @@ wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
 ```
 </details>
 
+## Performance & scale
+
+`wherefore` has been pressure-tested with synthetic CSV/Parquet/XLSX
+file pairs from 10,000 up to 1,000,000 rows to see how load time,
+comparison time, and memory use actually scale -- not just whether the
+tool works on small example files. Headline findings so far:
+
+- **CSV and Parquet both scale cleanly** through 1,000,000 rows with
+  no crash, OOM, or correctness regression. Parquet is consistently
+  faster, and the gap widens at larger sizes.
+- **XLSX is fine for human-scale spreadsheets, not large comparisons**
+  -- write/read time is dominated by the `openpyxl` library itself
+  (by its own documentation, CPU-intensive and ~50x file size in
+  memory when reading), not by anything in `wherefore`. Prefer CSV or
+  Parquet for large comparisons.
+- **A real optimization opportunity was found, not yet fixed**: the
+  datetime-detection heuristic that runs on every string column during
+  load currently costs almost as much as parsing the file itself, even
+  on columns that obviously aren't dates.
+
+Full methodology, hardware specs, and the actual numbers (updated as
+more scenarios -- S3, database sources, larger/messier data -- are
+tested) live in [`PERFORMANCE.md`](PERFORMANCE.md).
+
 ## Troubleshooting
 
 Hit an error message? Most of `wherefore`'s errors are written to be
