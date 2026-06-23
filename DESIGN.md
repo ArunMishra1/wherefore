@@ -10,13 +10,21 @@ want. This doc is the on-ramp to that one, not a replacement.
 Every claim below is checked against the real code. Where intent and
 reality diverge, this doc says so — see [Known gaps](#known-gaps).
 
-### Contents
+## Contents
 
-[The problem](#the-problem) · [How a comparison flows](#how-a-comparison-flows) ·
-[Key selection](#key-selection) · [The diff](#the-diff) ·
-[Clustering](#clustering) · [Taxonomy as data](#taxonomy-as-data) ·
-[The AI layer](#the-ai-layer) · [Engineering challenges](#engineering-challenges) ·
-[The stack](#the-stack) · [Summary](#summary) · [Known gaps](#known-gaps)
+- [Design](#design)
+  - [Contents](#contents)
+  - [The problem](#the-problem)
+  - [How a comparison flows](#how-a-comparison-flows)
+  - [Key selection](#key-selection)
+  - [The diff](#the-diff)
+  - [Clustering](#clustering)
+  - [Taxonomy as data](#taxonomy-as-data)
+  - [The AI layer](#the-ai-layer)
+  - [Engineering challenges](#engineering-challenges)
+  - [The stack](#the-stack)
+  - [Summary](#summary)
+  - [Known gaps](#known-gaps)
 
 ---
 

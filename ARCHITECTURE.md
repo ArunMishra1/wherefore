@@ -9,14 +9,16 @@ If you're adding a new taxonomy pattern specifically, see
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) instead — that's the step-by-step
 for the most common contribution. This doc is the wider map.
 
-### Contents
+## Contents
 
-[The pipeline, end to end](#the-pipeline-end-to-end) ·
-[Module map](#module-map) ·
-[Things that look like one thing but are another](#things-that-look-like-one-thing-but-are-another) ·
-[Key design decisions and why](#key-design-decisions-and-why) ·
-[Where the tests are](#where-the-tests-are) ·
-[If you're starting a new session on this codebase](#if-youre-starting-a-new-session-on-this-codebase)
+- [Architecture](#architecture)
+  - [Contents](#contents)
+  - [The pipeline, end to end](#the-pipeline-end-to-end)
+  - [Module map](#module-map)
+  - [Things that look like one thing but are another](#things-that-look-like-one-thing-but-are-another)
+  - [Key design decisions and why](#key-design-decisions-and-why)
+  - [Where the tests are](#where-the-tests-are)
+  - [If you're starting a new session on this codebase](#if-youre-starting-a-new-session-on-this-codebase)
 
 ---
 

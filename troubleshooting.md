@@ -6,13 +6,15 @@ itself first: `wherefore` is written to fail loudly with a specific
 reason rather than a generic stack trace, so the message usually says
 exactly what's wrong.
 
-### Contents
+## Contents
 
-[Installation](#installation) · [Reading files](#reading-files) ·
-[Key detection and matching](#key-detection-and-matching) ·
-[Database sources](#database-sources) · [S3](#s3) ·
-[`--explain` / the AI layer](#--explain--the-ai-layer) ·
-[Eval harness](#eval-harness) · [Still stuck?](#still-stuck)
+- [Installation](#installation)
+- [Reading files](#reading-files)
+- [Key detection and matching](#key-detection-and-matching)
+- [Database sources](#database-sources)
+- [S3](#s3)
+  - [`--explain` / the AI layer](#--explain--the-ai-layer)
+- Eval harness](#eval-harness) · [Still stuck?](#still-stuck)
 
 ---
 

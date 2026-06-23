@@ -6,10 +6,12 @@ wider map — module layout, the end-to-end pipeline, and a few real
 This doc covers the most common single contribution: adding a new
 taxonomy pattern.
 
-### Contents
+## Contents
 
-[Adding a new failure pattern](#adding-a-new-failure-pattern-to-the-taxonomy) ·
-[Design decisions worth knowing](#design-decisions-worth-knowing-before-you-dig-in)
+- [Contributing](#contributing)
+  - [Contents](#contents)
+  - [Adding a new failure pattern to the taxonomy](#adding-a-new-failure-pattern-to-the-taxonomy)
+  - [Design decisions worth knowing before you dig in](#design-decisions-worth-knowing-before-you-dig-in)
 
 ---
 

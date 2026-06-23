@@ -5,13 +5,16 @@ databases, larger row counts, messier data). "Does this scale" only
 has a real answer when backed by measurements — not a guarantee for
 every machine or dataset shape.
 
-### Contents
+## Contents
 
-[Methodology](#methodology) · [Test environment](#test-environment-sandbox-round-1) ·
-[CSV/Parquet results](#results-wherefore-compare-single-csvparquet-file-pair) ·
-[XLSX results](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet) ·
-[Where the time goes](#where-the-time-actually-goes-1000000-row-csv-breakdown) ·
-[Still to measure](#still-to-measure)
+- [Performance \& scale notes](#performance--scale-notes)
+  - [Contents](#contents)
+  - [Methodology](#methodology)
+  - [Test environment (sandbox, round 1)](#test-environment-sandbox-round-1)
+  - [Results: `wherefore compare`, single CSV/Parquet file pair](#results-wherefore-compare-single-csvparquet-file-pair)
+  - [XLSX: write-time-dominated, scales far worse than CSV/Parquet](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
+  - [Where the time actually goes (1,000,000-row CSV breakdown)](#where-the-time-actually-goes-1000000-row-csv-breakdown)
+  - [Still to measure](#still-to-measure)
 
 ---
 

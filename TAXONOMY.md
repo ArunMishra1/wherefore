@@ -6,12 +6,14 @@ why things are built the way they are — see
 [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md), which is a deep-dive log,
 not a reference doc.
 
-### Contents
+## Contents
 
-[What's built](#whats-built) ·
-[What's planned](#whats-planned) ·
-[How patterns work](#how-a-pattern-works) ·
-[Adding a pattern](#adding-a-new-pattern)
+- [Taxonomy](#taxonomy)
+  - [Contents](#contents)
+  - [What's built](#whats-built)
+  - [What's planned](#whats-planned)
+  - [How a pattern works](#how-a-pattern-works)
+  - [Adding a new pattern](#adding-a-new-pattern)
 
 ---
 

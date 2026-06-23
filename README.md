@@ -45,15 +45,27 @@ does and why it's built this way — no need to read source first.
 
 ---
 
-### Contents
+## Contents
 
-[Quickstart](#quickstart) · [Why this exists](#why-this-exists) ·
-[What's built](#whats-built) · [Architecture](#architecture) ·
-[Design — the full story](https://github.com/tracelore/wherefore/blob/main/DESIGN.md) ·
-[Evals](#evals--why-trust-the-explanations) · [All flags](#all-flags) ·
-[Performance & scale](#performance--scale) ·
-[Troubleshooting](https://github.com/tracelore/wherefore/blob/main/troubleshooting.md) ·
-[Contributing](#contributing)
+- [wherefore](#wherefore)
+  - [Contents](#contents)
+  - [Quickstart](#quickstart)
+  - [Why this exists](#why-this-exists)
+  - [What's built](#whats-built)
+  - [Architecture](#architecture)
+  - [Evals — why trust the explanations?](#evals--why-trust-the-explanations)
+  - [Usage](#usage)
+    - [One file pair](#one-file-pair)
+    - [Database sources](#database-sources)
+    - [A whole migration, not one table](#a-whole-migration-not-one-table)
+    - [What you get without an API key](#what-you-get-without-an-api-key)
+    - [What `--explain` adds](#what---explain-adds)
+  - [Privacy \& data handling](#privacy--data-handling)
+  - [All flags](#all-flags)
+  - [Performance \& scale](#performance--scale)
+  - [Troubleshooting](#troubleshooting)
+  - [Contributing](#contributing)
+  - [License](#license)
 
 ---
 
@@ -534,6 +546,7 @@ wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
   --yes / -y                    Skip the single combined confirmation prompt for the whole batch's
                                  auto-detected primary keys (db://* batch mode only).
 ```
+
 </details>
 
 ## Performance & scale
