@@ -8,13 +8,42 @@ exactly what's wrong.
 
 ## Contents
 
-- [Installation](#installation)
-- [Reading files](#reading-files)
-- [Key detection and matching](#key-detection-and-matching)
-- [Database sources](#database-sources)
-- [S3](#s3)
+- [Troubleshooting](#troubleshooting)
+  - [Contents](#contents)
+  - [Installation](#installation)
+    - [`pip install wherefore` fails on a very new Python version](#pip-install-wherefore-fails-on-a-very-new-python-version)
+    - [`wherefore[db]` fails to install psycopg2](#whereforedb-fails-to-install-psycopg2)
+    - [Homebrew install builds from source and takes several minutes](#homebrew-install-builds-from-source-and-takes-several-minutes)
+  - [Reading files](#reading-files)
+    - [`UnicodeDecodeError` when comparing a CSV](#unicodedecodeerror-when-comparing-a-csv)
+    - [A datetime column shows up as `pattern unrecognized` even though the dates clearly shifted](#a-datetime-column-shows-up-as-pattern-unrecognized-even-though-the-dates-clearly-shifted)
+    - [A column that should be a date is full of `NaT`/garbage values](#a-column-that-should-be-a-date-is-full-of-natgarbage-values)
+  - [Key detection and matching](#key-detection-and-matching)
+    - [`Could not auto-detect a join key column. Pass one explicitly with --key.`](#could-not-auto-detect-a-join-key-column-pass-one-explicitly-with---key)
+    - [Two files that should match show up entirely as "rows only in](#two-files-that-should-match-show-up-entirely-as-rows-only-in)
+    - [`--fuzzy-keys` resolved most rows but a handful are still unmatched](#--fuzzy-keys-resolved-most-rows-but-a-handful-are-still-unmatched)
+  - [Database sources](#database-sources)
+    - [`Error connecting to database: ... uses the db:// syntax but no connection-string environment variable was given`](#error-connecting-to-database--uses-the-db-syntax-but-no-connection-string-environment-variable-was-given)
+    - [`Environment variable 'X' is not set`](#environment-variable-x-is-not-set)
+    - [`Malformed sqlite connection string` mentioning slash counts](#malformed-sqlite-connection-string-mentioning-slash-counts)
+    - [Postgres connection fails with an SSL-related error](#postgres-connection-fails-with-an-ssl-related-error)
+    - [A composite (multi-column) primary key was detected but the comparison fails](#a-composite-multi-column-primary-key-was-detected-but-the-comparison-fails)
+    - [The primary-key confirmation prompt is annoying in a script](#the-primary-key-confirmation-prompt-is-annoying-in-a-script)
+    - [`compare-dir db://* db://*` says "mixing a database with a directory of files is not supported"](#compare-dir-db-db-says-mixing-a-database-with-a-directory-of-files-is-not-supported)
+    - [`compare-dir db://* db://*` skips a table I expected to be compared](#compare-dir-db-db-skips-a-table-i-expected-to-be-compared)
+    - [`No matching table names found between the source and target databases`](#no-matching-table-names-found-between-the-source-and-target-databases)
+  - [S3](#s3)
+    - [`Failed to read s3://bucket/key.csv from S3`](#failed-to-read-s3bucketkeycsv-from-s3)
+    - [`No AWS credentials found`](#no-aws-credentials-found)
+    - [`pip install wherefore[s3]` step was skipped](#pip-install-wherefores3-step-was-skipped)
   - [`--explain` / the AI layer](#--explain--the-ai-layer)
-- Eval harness](#eval-harness) · [Still stuck?](#still-stuck)
+    - [`--explain requires ANTHROPIC_API_KEY to be set in your environment`](#--explain-requires-anthropic_api_key-to-be-set-in-your-environment)
+    - [`--explain` is making real, billed API calls and I didn't expect that](#--explain-is-making-real-billed-api-calls-and-i-didnt-expect-that)
+    - [I'm worried about sensitive data reaching the API](#im-worried-about-sensitive-data-reaching-the-api)
+  - [Eval harness](#eval-harness)
+    - [`python3 -m evals.harness.run_eval` shows fewer than 7 cases, or different numbers than the README](#python3--m-evalsharnessrun_eval-shows-fewer-than-7-cases-or-different-numbers-than-the-readme)
+    - [Running `--llm` mode doesn't do anything / asks for an API key](#running---llm-mode-doesnt-do-anything--asks-for-an-api-key)
+  - [Still stuck?](#still-stuck)
 
 ---
 
@@ -53,8 +82,6 @@ cost per machine, not a bug. If it fails partway through, check
 for the actual failure — five distinct real build issues were found
 and fixed while setting up the tap (documented in the tap's own
 `README.md`), so if you hit something new, it's worth reporting.
-
----
 
 ## Reading files
 
@@ -102,8 +129,6 @@ rather than guessing it should be null, since that distinction is
 often itself the bug you're trying to find (a real null on one side,
 a string sentinel on the other).
 
----
-
 ## Key detection and matching
 
 ### `Could not auto-detect a join key column. Pass one explicitly with --key.`
@@ -118,6 +143,7 @@ wherefore compare old.csv new.csv --key employee_id
 ```
 
 ### Two files that should match show up entirely as "rows only in
+
 source" / "rows only in target"
 
 The most common real cause: the join key is formatted differently on
@@ -140,8 +166,6 @@ generated report. If the same literal transformation (e.g. "every
 mismatch is explained by stripping dashes") explains all of them,
 that's a real, systematic formatting difference worth fixing upstream,
 not a `wherefore` bug.
-
----
 
 ## Database sources
 
@@ -239,8 +263,6 @@ pairing identical filenames. If your migration renamed every table,
 there's nothing for name-matching to find; compare individual
 renamed pairs with `compare` instead.
 
----
-
 ## S3
 
 ### `Failed to read s3://bucket/key.csv from S3`
@@ -268,8 +290,6 @@ working at all, independent of `wherefore`.
 `pip install wherefore[s3]`. This is intentional (most users never
 touch S3, so nobody pays for `boto3`'s install weight unless they
 actually use it).
-
----
 
 ## `--explain` / the AI layer
 
@@ -303,8 +323,6 @@ scanner** — it won't catch a name or a home address. See
 documented false-positive case (long numeric IDs can resemble card
 numbers).
 
----
-
 ## Eval harness
 
 ### `python3 -m evals.harness.run_eval` shows fewer than 7 cases, or different numbers than the README
@@ -322,8 +340,6 @@ if your numbers match that shape.
 calls — it requires `ANTHROPIC_API_KEY` to be set, the same as
 `--explain` does. The default (no `--llm`) statistical-only mode is
 free and makes zero network calls.
-
----
 
 ## Still stuck?
 
