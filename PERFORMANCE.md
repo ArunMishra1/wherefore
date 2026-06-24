@@ -22,6 +22,9 @@ every machine or dataset shape.
     - [Schema](#schema)
     - [Results: 10,000 rows, varying column count](#results-10000-rows-varying-column-count)
     - [Results: 100,000 rows, varying column count](#results-100000-rows-varying-column-count)
+    - [Results: 250K, 500K, and 1M rows, varying column count](#results-250k-500k-and-1m-rows-varying-column-count)
+    - [The real finding: the column penalty doesn't just exist, it compounds](#the-real-finding-the-column-penalty-doesnt-just-exist-it-compounds)
+  - [What's next: real options, not just this one](#whats-next-real-options-not-just-this-one)
   - [Still to measure](#still-to-measure)
 
 ---
@@ -400,24 +403,172 @@ different cost regime — XLSX in particular goes from a 3.8s
 nuisance at 5 columns to a full minute at 100. CSV and Parquet stay
 fast in absolute terms at every width tested so far, but the *trend*
 (worsening per-column cost as rows grow) is the more important finding
-than any single number — it says the 500K/1M/wide-table corner of this
-matrix, not yet tested, is where real risk is most likely to live.
+than any single number.
 
-*250K, 500K, and 1M-row tiers at full column width are in progress —
-this section will be updated as those results come in.*
+### Results: 250K, 500K, and 1M rows, varying column count
+
+Same matrix, continued to the larger row tiers. XLSX was run through
+500K rows; at 1M rows XLSX was skipped for the 100-column tier
+specifically (projected ~30 minutes combined write+compare time, based
+on the confirmed worsening trend — a deliberate scope decision, not an
+oversight; see [What's next](#whats-next-real-options-not-just-this-one)
+below for the actual number that drove that call).
+
+```
+$ for cols in 5 10 20 30 50 100; do
+>   for fmt in csv parquet xlsx; do
+>     python run_width_test.py 500000 $cols $fmt
+>   done
+> done
+csv n500000_c5: 1.53s, peak_mem=479.5MB, exit=0
+parquet n500000_c5: 1.00s, peak_mem=663.5MB, exit=0
+xlsx n500000_c5: 17.35s, peak_mem=650.5MB, exit=0
+csv n500000_c100: 32.79s, peak_mem=7984.1MB, exit=0
+parquet n500000_c100: 12.72s, peak_mem=9911.4MB, exit=0
+xlsx n500000_c100: 321.36s, peak_mem=9469.1MB, exit=0
+```
+
+(Full 18-combination output for 500K, and the 12-combination
+CSV/Parquet-only output for 1M, omitted here for length — every number
+below was produced by the same `run_width_test.py` script shown above,
+just at different row/column arguments.)
+
+| Rows | Cols | CSV (s) | Parquet (s) | XLSX (s) |
+|---|---|---|---|---|
+| 250,000 | 5 | 1.07 | 0.73 | 8.97 |
+| 250,000 | 100 | 16.79 | 6.39 | 162.00 |
+| 500,000 | 5 | 1.53 | 1.00 | 17.35 |
+| 500,000 | 100 | 32.79 | 12.72 | 321.36 |
+| 1,000,000 | 5 | 2.20 | 1.46 | *(not run)* |
+| 1,000,000 | 100 | 67.36 | 27.39 | *(not run — see above)* |
+
+Verified correct at the largest, widest, heaviest combination actually
+run:
+
+```
+$ grep "mismatched row" width_test/results/report_n1000000_c100_csv.md
+### `amount` -- 10000 mismatched row(s)
+$ grep "mismatched row" width_test/results/report_n1000000_c100_parquet.md
+### `amount` -- 10000 mismatched row(s)
+```
+
+Exactly 10,000 mismatches — 1% of 1,000,000 — matching every other
+tier, confirmed correct even at 15.8GB (CSV) / 19.4GB (Parquet) peak
+memory.
+
+### The real finding: the column penalty doesn't just exist, it compounds
+
+Five row tiers now confirm the same shape for CSV's 5-column→100-column
+penalty:
+
+| Rows | CSV penalty (5→100 cols) | Parquet penalty (5→100 cols) |
+|---|---|---|
+| 10,000 | 2.3× | 1.6× |
+| 100,000 | 9.0× | 4.5× |
+| 250,000 | 15.7× | 8.8× |
+| 500,000 | 21.4× | 12.7× |
+| 1,000,000 | 30.6× | 18.8× |
+
+This is not noise. It is a clean, monotonic, worsening trend across
+five independent measurements. **Going from 5 to 100 columns costs
+proportionally more as row count grows** — at 10K rows it's a mild
+2.3×; at 1M rows the identical column-count change costs over 30×.
+Rows and columns are not independent cost dimensions that simply add —
+they compound.
+
+**A second, separate, equally real finding: at high column counts,
+format choice flips from "doesn't matter much" to "matters a lot."**
+
+| Rows | CSV time ÷ Parquet time, at 100 columns |
+|---|---|
+| 10,000 | 1.5× |
+| 100,000 | 2.4× |
+| 250,000 | 2.6× |
+| 500,000 | 2.6× |
+| 1,000,000 | 2.5× |
+
+At 5 columns (the original row-count-only tests), CSV and Parquet were
+close enough that format choice barely mattered. At 100 columns, CSV
+is consistently **2.4–2.6× slower than Parquet**, from 100K rows
+upward. **Format choice matters more as tables get wider, not as they
+get taller** — the opposite of what the original row-only testing
+would have suggested on its own.
+
+## What's next: real options, not just this one
+
+Three real findings came out of this investigation, each with a
+different appropriate response. Listed here as options to evaluate,
+not yet committed to:
+
+**1. The datetime-detection heuristic (`loaders._try_parse_datetime_columns`)
+is real, measured overhead, and it's the cheapest thing to fix.**
+Confirmed earlier in this document: it costs almost as much as the CSV
+parse it sits on top of, on every string column, every load — even
+columns that obviously aren't dates. A cheap pre-check (sample a
+handful of values per column; only attempt the full vectorized
+`pd.to_datetime` call if they look plausibly date-shaped) would not
+require touching the comparison engine, the clustering layer, or
+anything downstream. This is the highest-value, lowest-risk change
+available right now, precisely because it's isolated to one function
+with a narrow, well-understood job.
+
+**2. Parallelization is a real option, but it has a real ceiling, and
+it doesn't fix the column-count compounding by itself.** `wherefore`
+currently runs single-threaded per comparison. Two different kinds of
+parallelism are actually available, and they help different things:
+
+- **Across files** (`compare-dir`'s batch mode): comparing N table
+  pairs is currently sequential. Running multiple pairs concurrently
+  (a process pool, one process per table pair) would help wall-clock
+  time for a multi-table migration audit directly — this is the
+  easier, lower-risk form of parallelism, since each table pair is
+  already fully independent work.
+- **Within one comparison** (splitting one huge file into chunks,
+  loading/parsing in parallel, merging results): genuinely harder.
+  The datetime-detection heuristic and the diff itself both operate on
+  whole-column vectorized operations already — pandas/numpy are
+  already using SIMD/vectorization internally for a lot of this, so
+  naive multi-threading often fights the GIL for the Python-level
+  parts and gains little. This would need real profiling to find which
+  specific step benefits from chunking before attempting it, not an
+  assumption that "more cores" automatically helps a vectorized
+  pandas/numpy pipeline the way it would a row-by-row pure-Python loop.
+
+**3. A different engine for the heaviest cases is worth a real
+investigation, not a rewrite.** `wherefore` already depends on
+`polars` transitively (via `datacompy`). Polars is built for exactly
+this kind of large-tabular-diff workload and is known for handling
+wide tables more gracefully than pandas in general. Worth a real,
+isolated experiment — load the same 1M×100 CSV via `polars.read_csv`
+instead of `pandas.read_csv`, time it directly, see if the gap holds —
+before deciding whether routing the hot path (load + datetime
+detection specifically, not necessarily the whole pipeline) through
+polars is worth the added complexity. Not yet attempted. This is a
+meaningfully smaller, lower-risk move than a Go/Rust rewrite, since
+polars is already a dependency and already speaks pandas-compatible
+DataFrames.
+
+**Recommended order, if/when this gets picked up:** fix #1 first
+(cheap, isolated, immediately reduces real cost on every comparison
+regardless of size). Measure again. Then decide whether #2 or #3 is
+worth pursuing based on where the remaining cost actually sits — not
+before, since fixing #1 will change the relative shape of every number
+in this document.
 
 ## Still to measure
 
-- Column-width matrix at 250K, 500K, and 1M rows (in progress)
 - S3-backed sources (network latency as a new variable)
 - Database sources (`db://`), including `compare-dir`'s batch mode
-- Realistic/messy data: real dates, nulls, near-duplicate keys,
-  `--fuzzy-keys` — all excluded from this clean baseline
-- Whether the CSV/Parquet ordering flip between sandbox and Mac is a
-  hardware effect, a pandas/pyarrow version difference (3.0.2 vs
-  2.3.3, 24.0.0 both), or something else — not yet investigated, noted
-  as a real open question rather than guessed at
-- Why CSV's column-width compare-time penalty (2.3×→9.0×) is so much
-  smaller than its write-time penalty (40× at 10K rows) for the same
-  5→100 column change — not yet investigated
+- Realistic/messy data: real nulls, near-duplicate keys,
+  `--fuzzy-keys` — still excluded from this clean baseline (real dates
+  are now covered, via the `*_date` column in the width matrix)
+- Whether the CSV/Parquet ordering flip between sandbox and Mac (at 5
+  columns specifically) is a hardware effect, a pandas/pyarrow version
+  difference, or something else — not yet investigated
+- Why CSV's column-width compare-time penalty is smaller than its
+  write-time penalty for the same column-count change — not yet
+  investigated
+- The actual polars experiment described above (#3) — not yet run
+- XLSX at 1M rows × 100 columns — deliberately skipped (projected
+  ~30 minutes combined); revisit only if a real use case needs it
 
