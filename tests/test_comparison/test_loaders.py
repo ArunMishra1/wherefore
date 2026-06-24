@@ -176,6 +176,48 @@ def test_mostly_dates_with_a_null_sentinel_parses_as_hybrid_column():
     assert result["ts"].dtype == object
 
 
+def test_sentinel_nulls_clustered_at_the_start_still_parse_as_hybrid_column():
+    """
+    Regression test for a real risk introduced by this function's own
+    performance pre-check (see loaders.py's PERFORMANCE NOTE): the
+    cheap sample-based skip must use a RANDOM sample, not the first N
+    rows. Confirmed by direct testing that a first-N sample fails here:
+    if every sentinel happens to land in the first 20 rows of a real
+    export (a plausible real pattern -- header artifacts, early test
+    rows, etc., not a contrived corner case), a first-N sample would
+    see 20/20 failures and wrongly conclude the column has no
+    parseable dates at all -- silently reproducing the exact
+    all-or-nothing bug `test_mostly_dates_with_a_null_sentinel_parses_as_hybrid_column`
+    already regression-tests against, just reached a different way.
+
+    1,000 rows total so the sample-vs-full-column code path is
+    actually exercised (PRECHECK_SAMPLE_SIZE=20, so this needs
+    meaningfully more than 20 non-null values to test the real
+    pre-check logic, not just the small-column bypass).
+    """
+    n = 1000
+    rows = [f"{i},2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}" for i in range(20, n)]
+    sentinel_rows = [f"{i},NULL" for i in range(20)]
+    csv_text = "id,ts\n" + "\n".join(sentinel_rows + rows) + "\n"
+
+    import io
+
+    from wherefore.comparison.loaders import _try_parse_datetime_columns
+
+    df = pd.read_csv(io.StringIO(csv_text), keep_default_na=False, na_values=[""])
+    result = _try_parse_datetime_columns(df)
+
+    # The real dates (rows 20 onward) must still parse as genuine
+    # Timestamps -- the column must NOT be wrongly skipped just
+    # because every sentinel happened to land at the start.
+    assert isinstance(result.loc[20, "ts"], pd.Timestamp)
+    assert isinstance(result.loc[n - 1, "ts"], pd.Timestamp)
+    # The clustered sentinels must still be preserved exactly.
+    for i in range(20):
+        assert result.loc[i, "ts"] == "NULL"
+    assert result["ts"].dtype == object
+
+
 def test_mostly_garbage_column_is_not_converted(tmp_path):
     """
     The failure-rate threshold's other side: a column that's mostly

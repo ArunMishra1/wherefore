@@ -216,8 +216,30 @@ def _try_parse_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     confirmed directly that pd.to_datetime with format='ISO8601'
     parses bare numeric strings as dates, which would wrongly convert
     a fiscal-year/birth-year column.
+
+    PERFORMANCE NOTE (added after real measurement, see PERFORMANCE.md):
+    calling pd.to_datetime on the FULL column was confirmed to cost
+    roughly as much as parsing the whole file in the first place --
+    paid on every column, every load, even for columns with no
+    plausible relationship to dates (e.g. "name_523891"-style
+    strings). A cheap pre-check on a small RANDOM sample (not the
+    first N rows -- confirmed directly that sentinel/null values can
+    cluster early in a real export, which would make a first-N sample
+    wrongly conclude a genuine date column has zero parseable values)
+    rules out the common case -- a column that is obviously not
+    dates -- using ~20 values instead of the full column. Confirmed
+    directly: this sample check costs about 1/500th of the full-column
+    call on a 1,000,000-row non-date column. The false-skip risk this
+    introduces is real but vanishingly small: for a column sitting
+    exactly at the existing 20%-failure-rate boundary, the probability
+    a random 20-value sample shows zero successes (and so wrongly
+    skips a column that would have passed the real check) is
+    approximately 1 in 95 trillion -- computed directly, not assumed.
+    This pre-check only ever SKIPS the expensive call early; it never
+    changes the result for any column that proceeds past it.
     """
     MAX_PARSE_FAILURE_RATE = 0.2
+    PRECHECK_SAMPLE_SIZE = 20
 
     df = df.copy()
     for col in df.columns:
@@ -230,6 +252,12 @@ def _try_parse_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
             continue
         if all(str(v).isdigit() for v in non_null):
             continue  # bare numeric strings (years, IDs) -- not a datetime column
+
+        if len(non_null) > PRECHECK_SAMPLE_SIZE:
+            sample = non_null.sample(n=PRECHECK_SAMPLE_SIZE, random_state=0)
+            sample_parsed = pd.to_datetime(sample, errors="coerce", format="ISO8601")
+            if sample_parsed.isna().all():
+                continue  # sample shows zero parseable values -- not a datetime column
 
         parsed = pd.to_datetime(df[col], errors="coerce", format="ISO8601")
         # A value parsed to NaT either because it genuinely failed to
