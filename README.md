@@ -64,6 +64,7 @@ does and why it's built this way — no need to read source first.
   - [All flags](#all-flags)
   - [Performance \& scale](#performance--scale)
   - [Troubleshooting](#troubleshooting)
+  - [Changelog](#changelog)
   - [Contributing](#contributing)
   - [License](#license)
 
@@ -577,6 +578,12 @@ specific and actionable on their own, but
 collects the real, specific failure modes encountered while building
 and using this tool — installation issues, file-reading gotchas, key
 matching, database connections, S3, and the AI layer.
+
+## Changelog
+
+[`CHANGELOG.md`](https://github.com/tracelore/wherefore/blob/main/CHANGELOG.md)
+has the real, per-release history — what changed, what was fixed, and
+why, grounded in actual commits rather than a marketing summary.
 
 ## Contributing
 
