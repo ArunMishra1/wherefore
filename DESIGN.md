@@ -92,6 +92,16 @@ specific case: the same record, reformatted. The real test case is
 and one extra row; `wherefore` can recognize them as the same entity,
 with a confidence score attached.
 
+Key-string similarity alone can't always tell "the same record,
+reformatted" apart from "two different records that happen to look
+similar" — confirmed directly by testing, not assumed: two unrelated
+records whose keys differ only in separator or case can score high
+enough to merge. A content sanity-check runs after the key match is
+proposed and before it's applied: it compares the rows' actual
+non-key values and requires most of them to agree before accepting
+the match, deferring (not guessing) when there isn't enough signal
+either way.
+
 ## The diff
 
 The comparison layer wraps `datacompy` to produce a `DiffResult`:

@@ -89,6 +89,10 @@ src/wherefore/
 │   │                         level up, for db:// CLI sources specifically.
 │   ├── key_matching.py       Fuzzy key resolution (--fuzzy-keys) — rapidfuzz-
 │   │                         based, with confidence scores kept, not discarded.
+│   │                         content_sanity_check() re-checks proposed matches
+│   │                         against real row content before cli.py applies
+│   │                         them — key strings alone can't tell "same record,
+│   │                         reformatted" from "different record, similar key."
 │   ├── diff_engine.py        Wraps datacompy. The DiffResult dataclass
 │   │                         (in diff_result.py) is the contract every
 │   │                         layer above this one consumes.

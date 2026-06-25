@@ -1541,6 +1541,58 @@ record types or eras (e.g. one legacy system using underscores,
 another using dashes, for unrelated entities) rather than within one
 consistent ID scheme.
 
+### Update: fixed, not just documented
+
+The `--fuzzy-keys` false-positive above was a real correctness gap,
+not just a performance footnote — fixed with a new
+`content_sanity_check()` in `key_matching.py`, applied in
+`cli.py`'s `_apply_fuzzy_key_resolution` right after `fuzzy_match_keys`
+proposes matches and before they're applied as a rename.
+
+**What it does:** for each proposed fuzzy match, compares the matched
+rows' actual non-key column values, requiring most of them to agree
+exactly. Low-cardinality columns (≤5 distinct values) are excluded
+from the vote — confirmed directly that a binary status flag matches
+by pure chance often enough to make a naive vote unreliable.
+Deliberately uses exact equality, not a numeric tolerance, for the
+same reason `key_format_similarity` itself rejected a score-based
+threshold: no clean line to draw, no new parameter to mistune.
+
+**Two real edge cases were found and fixed while building this, not
+assumed away:**
+
+1. *A strict majority (`> half`) wrongly rejected a genuine reformat
+   that also had an independent, real value mismatch* — a row can
+   legitimately have both problems at once, and with only 2 voting
+   columns, that's exactly a 1-of-2 tie. Fixed: `>= half` instead.
+   Verified directly against both the false-positive case (0 of 2,
+   still correctly rejected) and this real case (1 of 2, now correctly
+   accepted).
+2. *Cardinality computed against a small DataFrame is unreliable* —
+   with very few rows, every column can look low-cardinality purely
+   because there's barely any data to be distinct across, silently
+   disabling the filter exactly when there's least data to be
+   confident from. Found by the unit tests for this fix, not assumed:
+   a 1-row-per-side test case wrongly accepted an unrelated pair
+   because every column appeared low-cardinality. Fixed: below 20
+   rows, cardinality isn't trusted and every non-key column votes.
+3. *A genuinely existing test broke after the fix shipped, revealing
+   a real, structural limit*: with exactly one voting column, a real
+   value mismatch on that column is indistinguishable from an
+   unrelated record — there's no second column to show the row is
+   otherwise the same. Resolved by deferring (accepting the match)
+   when there's only one voting column, the same principle already
+   used at zero columns: not enough signal to safely decide either
+   way, so don't guess.
+
+Verified end-to-end after all three fixes: the original Round 8 false
+positive still correctly rejects (`Matched rows: 1000`, down from the
+broken 1050), the legitimate reformat-with-real-mismatch case still
+correctly resolves (`Matched rows: 10000`, `100 mismatched rows`,
+matching Round 7's original result exactly), and the full test suite
+— 392 tests, including 6 new ones covering this fix directly — passes
+clean.
+
 ## Round 9: the polars conversion-overhead spike (item 3)
 
 Item 3's experiment (under "What's next") measured polars' load +
