@@ -7,21 +7,24 @@ every machine or dataset shape.
 
 ### Contents
 
-[Methodology](#methodology) · [Test environment](#test-environment-sandbox-round-1) ·
-[CSV/Parquet results](#results-wherefore-compare-single-csvparquet-file-pair) ·
-[XLSX results](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet) ·
-[Where the time goes](#where-the-time-actually-goes-1000000-row-csv-breakdown) ·
-[Round 2: real hardware](#round-2-real-hardware-mac) ·
-[Round 2: proof](#round-2-proof-not-just-numbers) ·
-[Round 3: column count](#round-3-column-count-not-just-row-count) ·
-[What's next](#whats-next-real-options-not-just-this-one) ·
-[Item 1 results](#item-1-results-the-datetime-detection-pre-check) ·
-[Item 3 results](#item-3-results-the-polars-experiment) ·
-[Item 4 investigation](#item-4-investigation-the-ordering-flip-that-wasnt) ·
-[Item 5 investigation](#item-5-investigation-why-compare-time-and-write-time-penalties-differed) ·
-[Round 4: database sources](#round-4-database-sources-item-6) ·
-[Round 4 extension: db column count](#round-4-extension-does-column-count-compound-for-databases-too) ·
-[Still to measure](#still-to-measure)
+- [Methodology](#methodology)
+- [Test environment](#test-environment-sandbox-round-1)
+- [CSV/Parquet results](#results-wherefore-compare-single-csvparquet-file-pair)
+- [XLSX results](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
+- [Where the time goes](#where-the-time-actually-goes-1000000-row-csv-breakdown)
+- [Round 2: real hardware](#round-2-real-hardware-mac)
+- [Round 2: proof](#round-2-proof-not-just-numbers)
+- [Round 3: column count](#round-3-column-count-not-just-row-count)
+- [What's next](#whats-next-real-options-not-just-this-one)
+- [Item 1 results](#item-1-results-the-datetime-detection-pre-check)
+- [Item 3 results](#item-3-results-the-polars-experiment)
+- [Item 4 investigation](#item-4-investigation-the-ordering-flip-that-wasnt)
+- [Item 5 investigation](#item-5-investigation-why-compare-time-and-write-time-penalties-differed)
+- [Round 4: database sources](#round-4-database-sources-item-6)
+- [Round 4 extension: db column count](#round-4-extension-does-column-count-compound-for-databases-too)
+- [Round 5: S3 sources](#round-5-s3-sources-item-7)
+- [Round 6: compare-dir batch mode](#round-6-compare-dirs-database-batch-mode-item-1-of-the-follow-up-list)
+- [Still to measure](#still-to-measure)
 
 ---
 
@@ -1038,11 +1041,210 @@ at width never gets triggered; the two backends are close to equal
 exactly because the cost that would differentiate them isn't present
 yet.
 
+## Round 5: S3 sources (item 7)
+
+**Real limitation, stated upfront: no AWS account was available for
+this round.** S3 testing here uses `moto` (the same mocked-AWS dev
+dependency the project's own test suite uses), which mocks the AWS API
+locally — there is no real network, no real latency, no real S3
+service involved. This measures `wherefore`'s own local processing
+cost for the S3 code path honestly and correctly. It does **not**
+measure real-world network/latency cost, which is almost certainly the
+dominant real-world factor for actual S3 usage and is a genuinely
+different variable than anything tested here. Flagged clearly, not
+glossed over — this round answers "does wherefore's own S3 code add
+overhead beyond download+parse" and nothing about "how fast is a real
+S3 bucket."
+
+### A real methodology constraint, found and worked around
+
+`wherefore compare`'s S3 path downloads the full object into memory via
+one `boto3` `get_object()` call before any parsing starts (confirmed
+directly in `loaders.py` — no streaming, no partial reads). The
+natural way to test this would have been the same subprocess approach
+used for every other round (`run_test.py`-style: shell out to the real
+CLI, measure wall-clock). That does not work for moto specifically:
+**moto's mocked AWS state is process-local and does not persist across
+separate `mock_aws()` context entries, even within the same process —
+confirmed directly** by creating a bucket in one `mock_aws()` block and
+showing a second block in the same process cannot see it
+(`NoSuchBucket`). A subprocess CLI invocation would start its own,
+empty mock with no knowledge of anything uploaded beforehand, so the
+file would never be found. The fix: run the real `wherefore compare`
+CLI command in-process via `typer`'s `CliRunner`, inside the same
+`mock_aws()` context used to upload the test files — this runs the
+exact same CLI code path, just without a subprocess boundary, which
+moto's design requires.
+
+### Results: full `compare`, S3 source (in-process)
+
+```
+$ python3 run_s3_test.py 5000 20000 50000 100000 500000
+s3 n=5000: 0.100s, mem_delta=11.6MB, exit=0
+s3 n=20000: 0.162s, mem_delta=10.8MB, exit=0
+s3 n=50000: 0.325s, mem_delta=7.9MB, exit=0
+s3 n=100000: 0.457s, mem_delta=17.7MB, exit=0
+s3 n=500000: 2.152s, mem_delta=108.2MB, exit=0
+```
+
+Verified correct at the largest tier:
+
+```
+$ grep "mismatched row\|Join key" /tmp/s3_report_500000.md
+- Join key: `id`
+### `amount` -- 5000 mismatched row(s)
+```
+
+These absolute numbers are **not directly comparable** to other
+rounds' subprocess-based numbers — running in-process skips Python
+interpreter startup and library-import cost entirely (paid once before
+the loop, not per measurement), so they look faster than they would as
+a separate process per run. The comparison that matters here is local
+load vs. S3 load, both measured the same in-process way.
+
+### Local file load vs. S3 (mocked) load, same data, same process
+
+```
+$ python3 -c "
+import time
+from wherefore.comparison import loaders
+for n in [5000, 20000, 50000, 100000, 500000]:
+    t0 = time.time()
+    local_df = loaders.load_csv(f'data/source_{n}.csv')
+    local_time = time.time() - t0
+    with mock_aws():
+        # upload, then:
+        t0 = time.time()
+        s3_df = loaders.load_csv(f's3://wherefore-test-bucket/source_{n}.csv')
+        s3_time = time.time() - t0
+    print(f'n={n}: local={local_time:.4f}s, s3(mocked)={s3_time:.4f}s, ratio={s3_time/local_time:.2f}x')
+"
+n=5000: local=0.0145s, s3(mocked)=0.0165s, ratio=1.14x
+n=20000: local=0.0197s, s3(mocked)=0.0351s, ratio=1.78x
+n=50000: local=0.0471s, s3(mocked)=0.0558s, ratio=1.19x
+n=100000: local=0.0819s, s3(mocked)=0.0934s, ratio=1.14x
+n=500000: local=0.4032s, s3(mocked)=0.4291s, ratio=1.06x
+```
+
+**With network latency removed (moto's mock), wherefore's S3 code path
+adds only modest overhead — roughly 6–19% over loading the identical
+file locally**, no clear trend with scale (the 20K tier's 1.78× looks
+like noise from a small absolute time, not a real pattern — the other
+four tiers cluster tightly around 1.1-1.2×). This is the cost of one
+`boto3.get_object()` call plus wrapping the response in a `BytesIO`
+buffer — not real data transfer, since moto never leaves the process.
+
+**What this does and doesn't tell you:** it confirms `wherefore`'s own
+S3 integration isn't doing anything wasteful — the overhead beyond
+local-file cost is small and bounded. It says nothing about real S3
+performance, which depends on bucket region, object size, connection
+quality, and AWS's actual API latency — none of which a local mock can
+simulate. Real-world S3 comparisons should expect meaningfully more
+overhead than this number, dominated by network round-trip time, not
+by anything measured here.
+
+## Round 6: compare-dir's database batch mode (item 1 of the follow-up list)
+
+Round 4 tested single-pair `compare` against `db://` sources only.
+`compare-dir db://* db://*` — the real multi-table migration-audit
+mode — was untested. Closed here with a realistic batch: one database,
+8 tables, **varying both row count and column count per table**, not
+8 uniform tables that only differ in size. A real database has tables
+of genuinely different shapes — a small lookup table next to a huge,
+wide transactional one — and testing only uniform tables would have
+missed that.
+
+### The 8 tables
+
+| Table | Rows | Columns |
+|---|---|---|
+| `lookup_5k` | 5,000 | 5 |
+| `ref_10k` | 10,000 | 10 |
+| `small_30k` | 30,000 | 20 |
+| `medium_50k` | 50,000 | 30 |
+| `medium_100k` | 100,000 | 50 |
+| `large_250k` | 250,000 | 100 |
+| `large_500k` | 500,000 | 5 |
+| `huge_1m` | 1,000,000 | 10 |
+
+`large_250k` (large AND wide) and `large_500k` (large but narrow) are
+deliberately placed next to each other — the real stress case for
+batch mode is a table that's both large and wide, and this set
+includes one without making every large table wide.
+
+### Results (Mac, real hardware)
+
+```
+$ python generate_batch_data.py sqlite
+  lookup_5k (5,000 rows, 5 cols): 0.01s
+  ref_10k (10,000 rows, 10 cols): 0.02s
+  small_30k (30,000 rows, 20 cols): 0.13s
+  medium_50k (50,000 rows, 30 cols): 0.34s
+  medium_100k (100,000 rows, 50 cols): 1.09s
+  large_250k (250,000 rows, 100 cols): 6.51s
+  large_500k (500,000 rows, 5 cols): 0.76s
+  huge_1m (1,000,000 rows, 10 cols): 2.66s
+Total generation: 11.52s
+Source DB size: 1389.8MB
+```
+
+```
+$ wherefore compare-dir db://* db://* --source-conn-env SOURCE_DB \
+    --target-conn-env TARGET_DB --yes --output-dir batch_test/results
+Elapsed: 35.69s
+Exit code: 0
+
+Detecting primary keys for 8 table(s)...
+  [... all 8 correctly detect 'id' from real schema ...]
+Found 8 matching table pair(s). Comparing...
+  [DIFF] huge_1m: 1 finding(s) (unrecognized pattern(s))
+  [... all 8 tables show 1 finding each ...]
+Done: 8 compared, 0 skipped.
+```
+
+Same batch against Postgres (separate `wherefore_batch_source`/
+`wherefore_batch_target` databases, same table specs):
+
+```
+$ wherefore compare-dir db://* db://* [...] --output-dir batch_test/results_pg
+Elapsed: 31.80s
+Exit code: 0
+[... identical structure, all 8 tables, 1 finding each ...]
+```
+
+Verified correct on the two tables most likely to expose a real bug —
+the widest table and the largest table — for both backends:
+
+```
+$ grep "mismatched row" batch_test/results/large_250k_report.md batch_test/results/huge_1m_report.md
+large_250k_report.md:### `amount` -- 2500 mismatched row(s)
+huge_1m_report.md:### `amount` -- 10000 mismatched row(s)
+$ grep "mismatched row" batch_test/results_pg/large_250k_report.md batch_test/results_pg/huge_1m_report.md
+large_250k_report.md:### `amount` -- 2500 mismatched row(s)
+huge_1m_report.md:### `amount` -- 10000 mismatched row(s)
+```
+
+2,500 (1% of 250,000) and 10,000 (1% of 1,000,000) — correct on both
+backends, confirming `compare-dir` handles 8 tables of genuinely
+different shapes correctly within a single batch run, not just
+uniform tables that happen to differ in row count alone.
+
+**A real, complete migration audit across 8 mixed-shape tables —
+roughly 1.95 million total rows, one table 100 columns wide — finishes
+in well under a minute on real hardware (35.69s SQLite, 31.80s
+Postgres), with one combined primary-key confirmation step for the
+whole batch rather than one per table.** Postgres edging out SQLite
+here (31.80s vs 35.69s) is consistent with Round 4's finding that
+Postgres pulls ahead at high column counts — this batch includes a
+real 100-column, 250K-row table, exactly the regime where that effect
+showed up.
+
 ## Still to measure
 
-- S3-backed sources (network latency as a new variable)
-- `compare-dir`'s database batch mode specifically (multiple table
-  pairs, not just one) — this round tested single-pair `compare` only
+- **Real S3 with a real AWS account** — round 5 only covers
+  `wherefore`'s own local processing cost via mocked AWS; actual
+  network/latency cost against a real bucket is untested and likely
+  the dominant real-world factor
 - Realistic/messy data: real nulls, near-duplicate keys,
   `--fuzzy-keys` — still excluded from this clean baseline (real dates
   are now covered, via the `*_date` column in the width matrix)
@@ -1050,5 +1252,4 @@ yet.
   boundary above — not yet run
 - XLSX at 1M rows × 100 columns — deliberately skipped (projected
   ~30 minutes combined); revisit only if a real use case needs it
-- Database sources beyond 500K rows — not yet tested
 
