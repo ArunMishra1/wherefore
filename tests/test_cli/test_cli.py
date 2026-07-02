@@ -95,6 +95,72 @@ def test_identical_files_report_no_mismatches(timezone_shift_csv_pair):
     assert "No column mismatches found" in result.output
 
 
+@pytest.fixture
+def column_count_mismatch_csv_pair(tmp_path):
+    """
+    Source has an extra column (legacy_flag) with no equivalent in
+    target, and every OTHER column is identical -- isolates schema
+    drift as the only thing wherefore has to report, so a test against
+    this fixture can't accidentally pass due to some other finding.
+    """
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=7)
+    target = source.drop(columns=["status"]).copy()
+    source = source.rename(columns={"status": "legacy_flag"})
+    # legacy_flag now only exists in source; nothing else differs.
+    source_path = tmp_path / "source.csv"
+    target_path = tmp_path / "target.csv"
+    source.to_csv(source_path, index=False)
+    target.to_csv(target_path, index=False)
+    return source_path, target_path
+
+
+def test_schema_drift_is_reported_to_terminal_and_report(column_count_mismatch_csv_pair):
+    """
+    Regression test for the exact scenario this feature was built for:
+    before this, a column dropped during migration with no explicit
+    mapping was silently excluded everywhere, and the CLI would report
+    'no mismatches' -- a false all-clear. Now it must be visible both
+    on stdout and in the written report, and must NOT be conflated
+    with 'no column mismatches found' just because there are zero
+    value-level findings.
+    """
+    source_path, target_path = column_count_mismatch_csv_pair
+    output_path = source_path.parent / "report.md"
+
+    result = runner.invoke(
+        app, ["compare", str(source_path), str(target_path), "--output", str(output_path)]
+    )
+    assert result.exit_code == 0
+    assert "Schema differences" in result.output
+    assert "1 only in source" in result.output
+    # Terminal output is deliberately counts-only (not column names) --
+    # see _print_summary -- to stay readable on wide schemas; names
+    # live in the full report instead.
+    assert "legacy_flag" not in result.output
+
+    report_text = output_path.read_text()
+    assert "## Schema differences" in report_text
+    assert "legacy_flag" in report_text
+    assert "only in source" in report_text
+    # legacy_flag never appears as a column-level mismatch -- it was
+    # never joined against anything on the target side.
+    assert "`legacy_flag` --" not in report_text
+
+
+def test_no_schema_drift_omits_the_section_entirely(timezone_shift_csv_pair):
+    """The common case (identical column sets) must not print an empty
+    or spurious 'Schema differences' section."""
+    source_path, target_path = timezone_shift_csv_pair
+    output_path = source_path.parent / "report.md"
+
+    result = runner.invoke(
+        app, ["compare", str(source_path), str(target_path), "--output", str(output_path)]
+    )
+    assert result.exit_code == 0
+    assert "Schema differences" not in result.output
+    assert "Schema differences" not in output_path.read_text()
+
+
 def test_missing_file_exits_with_error(tmp_path):
     real_file = tmp_path / "real.csv"
     real_file.write_text("id,val\n1,2\n")
@@ -445,6 +511,72 @@ def test_compare_dir_finds_and_compares_all_matching_pairs(batch_test_dirs, tmp_
     assert "clean_table.csv" in result.output
     assert "no mismatches" in result.output
     assert "Done: 3 compared, 0 skipped" in result.output
+
+
+@pytest.fixture
+def batch_test_dirs_with_schema_drift(tmp_path):
+    """
+    One pair with a pure schema-drift finding (a column dropped, zero
+    value-level mismatches otherwise -- isolates the '[SCHEMA]' status
+    line, which only exists to cover the case [OK]/[DIFF] can't), and
+    one clean pair, to confirm the tally correctly counts 1 of 2 as
+    drifted, not 0 or 2.
+    """
+    source_dir = tmp_path / "source"
+    target_dir = tmp_path / "target"
+    source_dir.mkdir()
+    target_dir.mkdir()
+
+    s1 = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=11)
+    t1 = s1.drop(columns=["status"]).copy()
+    s1.to_csv(source_dir / "accounts.csv", index=False)
+    t1.to_csv(target_dir / "accounts.csv", index=False)
+
+    s2 = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=12)
+    s2.to_csv(source_dir / "clean_table.csv", index=False)
+    s2.to_csv(target_dir / "clean_table.csv", index=False)
+
+    return source_dir, target_dir
+
+
+def test_compare_dir_reports_pure_schema_drift_pair_with_its_own_status(
+    batch_test_dirs_with_schema_drift, tmp_path
+):
+    """
+    A pair with zero value-level findings but a dropped column must
+    NOT show up as '[OK]: no mismatches' (a false all-clear) -- it
+    needs its own '[SCHEMA]' status distinct from both [OK] and [DIFF]
+    so it stays visible and grep-able in a large batch.
+    """
+    source_dir, target_dir = batch_test_dirs_with_schema_drift
+    output_dir = tmp_path / "reports"
+
+    result = runner.invoke(
+        app, ["compare-dir", str(source_dir), str(target_dir), "--output-dir", str(output_dir)]
+    )
+
+    assert result.exit_code == 0
+    assert "[SCHEMA] accounts.csv" in result.output
+    assert "[OK] accounts.csv: no mismatches" not in result.output
+    assert "[OK] clean_table.csv: no mismatches" in result.output
+    assert "Schema drift detected in 1 of 2 pair(s) compared: accounts.csv" in result.output
+
+    accounts_report = (output_dir / "accounts_report.md").read_text()
+    assert "## Schema differences" in accounts_report
+    assert "status" in accounts_report
+
+
+def test_compare_dir_omits_schema_drift_tally_when_no_pairs_affected(batch_test_dirs, tmp_path):
+    """The common case (no pair has schema drift) must not print an
+    empty or spurious tally line."""
+    source_dir, target_dir = batch_test_dirs
+    output_dir = tmp_path / "reports"
+
+    result = runner.invoke(
+        app, ["compare-dir", str(source_dir), str(target_dir), "--output-dir", str(output_dir)]
+    )
+    assert result.exit_code == 0
+    assert "Schema drift detected" not in result.output
 
 
 def test_compare_dir_writes_one_report_per_pair(batch_test_dirs, tmp_path):

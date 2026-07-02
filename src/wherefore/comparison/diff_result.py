@@ -138,11 +138,32 @@ class DiffResult:
     column_summary: list[ColumnSummary] = field(default_factory=list)
     mismatches: list[MismatchRow] = field(default_factory=list)
 
+    # Columns present on only one side -- e.g. dropped or renamed
+    # during a migration, with no explicit mapping provided. This is a
+    # SCHEMA-level fact, not a value-level mismatch: these columns
+    # never appear in column_summary/mismatches at all, since
+    # comparison is only defined for columns present on both sides
+    # (datacompy's own column_stats already silently only covers the
+    # intersection -- see diff_engine.py's compare()). Surfacing this
+    # separately is what makes a "0 mismatches" result honest: it
+    # means every COMPARED column matched, not that the two datasets
+    # are structurally equivalent. Deliberately NOT run through
+    # clustering/taxonomy -- there's no statistical signature to
+    # compute here (a column either exists on both sides or it
+    # doesn't), so this stays a plain structural fact reported
+    # directly, the same way source_row_count/target_row_count are.
+    source_only_columns: list[str] = field(default_factory=list)
+    target_only_columns: list[str] = field(default_factory=list)
+
     # Populated only when key_match_strategy == "fuzzy" -- maps a
     # stringified target key to the confidence score of its match to a
     # source key. Needed by the key_mismatch taxonomy pattern, which
     # specifically looks for LOW-confidence fuzzy matches as its signal.
     fuzzy_match_confidence: dict[str, float] | None = None
+
+    @property
+    def has_schema_drift(self) -> bool:
+        return bool(self.source_only_columns or self.target_only_columns)
 
     def columns_with_mismatches(self) -> list[str]:
         return [c.column for c in self.column_summary if not c.all_match]

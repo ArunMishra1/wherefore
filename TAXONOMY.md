@@ -54,6 +54,25 @@ findings are reported; disambiguating "reformatted" from "duplicated"
 is left to the reasoning layer, not guessed at by clustering. See
 `cluster_mismatches.py`'s `_detect_row_presence_candidates` docstring.
 
+**A third category, deliberately NOT a taxonomy pattern:** columns
+present on only one side (dropped, renamed with no explicit mapping,
+or added) are reported as `DiffResult.source_only_columns` /
+`target_only_columns` and surfaced in every report as a "## Schema
+differences" section — but they're not one of the eight patterns
+above, on purpose. A pattern needs a statistical signature with a
+confidence score to run through `detection_hints`/clustering; "this
+column exists on one side and not the other" isn't a statistic to
+score, it's a structural fact that's simply true or false. It's
+reported directly, unconditionally, with no confidence threshold and
+no LLM call — closer to `source_row_count`/`target_row_count` than to
+`enum_drift`. `wherefore` deliberately does not attempt fuzzy
+name-matching to guess at renames here (e.g. inferring `cust_id` →
+`customer_id`) — same reasoning as `key_format_similarity` rejecting
+fuzzy scoring for row keys (see its docstring): a wrong guess is worse
+than an honest "both sides report this as unmatched," especially since
+a false rename-match would hide the exact silent-column-drop scenario
+this exists to catch.
+
 **Eval results** (reproducible, no API key needed):
 ```bash
 python3 -m evals.harness.run_eval

@@ -626,6 +626,7 @@ def compare_dir(
     succeeded = 0
     failed = 0
     all_redaction_categories: set[str] = set()
+    pairs_with_schema_drift: list[str] = []
 
     for source_ref, target_ref, pair_label, report_stem in pairs:
         try:
@@ -670,16 +671,36 @@ def compare_dir(
         report_path.write_text(report)
 
         total_findings = len(result.clusters) + len(result.row_presence_clusters)
-        if total_findings == 0:
+        schema_drift = result.diff_result.has_schema_drift
+        if schema_drift:
+            pairs_with_schema_drift.append(pair_label)
+            drift_parts = []
+            if result.diff_result.source_only_columns:
+                drift_parts.append(f"{len(result.diff_result.source_only_columns)} source-only")
+            if result.diff_result.target_only_columns:
+                drift_parts.append(f"{len(result.diff_result.target_only_columns)} target-only")
+            drift_summary = ", ".join(drift_parts) + " col(s)"
+
+        if total_findings == 0 and not schema_drift:
             typer.secho(f"  [OK] {pair_label}: no mismatches", fg=typer.colors.GREEN)
+        elif total_findings == 0 and schema_drift:
+            # No value-level findings, but "no mismatches" would be a
+            # false all-clear here -- some columns weren't compared at
+            # all. Its own status (not [OK], not [DIFF]) so it stays
+            # grep-able independently of value-level findings.
+            typer.secho(
+                f"  [SCHEMA] {pair_label}: {drift_summary} excluded from comparison "
+                "(no other mismatches)",
+                fg=typer.colors.YELLOW,
+            )
         else:
             pattern_names = [p.pattern_id for c in result.clusters for p in c.candidate_patterns]
             pattern_names += [p.pattern_id for c in result.row_presence_clusters for p in c.candidate_patterns]
             pattern_summary = ", ".join(pattern_names) or "unrecognized pattern(s)"
-            typer.secho(
-                f"  [DIFF] {pair_label}: {total_findings} finding(s) ({pattern_summary})",
-                fg=typer.colors.CYAN,
-            )
+            line = f"  [DIFF] {pair_label}: {total_findings} finding(s) ({pattern_summary})"
+            if schema_drift:
+                line += f" + schema drift ({drift_summary})"
+            typer.secho(line, fg=typer.colors.CYAN)
         succeeded += 1
 
     typer.echo()
@@ -687,6 +708,12 @@ def compare_dir(
         typer.secho(
             f"Redacted before sending to Claude (across all pairs): "
             f"{', '.join(sorted(all_redaction_categories))} -- pass --no-redact to disable this.",
+            fg=typer.colors.YELLOW,
+        )
+    if pairs_with_schema_drift:
+        typer.secho(
+            f"Schema drift detected in {len(pairs_with_schema_drift)} of {succeeded} pair(s) "
+            f"compared: {', '.join(pairs_with_schema_drift)}.",
             fg=typer.colors.YELLOW,
         )
     typer.secho(f"Done: {succeeded} compared, {failed} skipped. Reports written to {output_dir}/", fg=typer.colors.GREEN)
@@ -950,6 +977,30 @@ def _render_report(
         "",
     ]
 
+    # Placed before the explain/no-explain note deliberately: a "0
+    # mismatches" result further down is only honest once the reader
+    # knows some columns weren't compared at all. This is a plain
+    # structural fact (a column either exists on both sides or it
+    # doesn't) -- no statistical signature, no candidate_patterns, no
+    # LLM narrative, unlike everything below it in this report. See
+    # DiffResult.has_schema_drift's docstring.
+    if diff_result.has_schema_drift:
+        lines.append("## Schema differences")
+        lines.append("")
+        lines.append("**These columns were excluded from the comparison below.**")
+        lines.append("")
+        if diff_result.source_only_columns:
+            cols = ", ".join(f"`{c}`" for c in diff_result.source_only_columns)
+            lines.append(
+                f"- {len(diff_result.source_only_columns)} column(s) only in source: {cols}"
+            )
+        if diff_result.target_only_columns:
+            cols = ", ".join(f"`{c}`" for c in diff_result.target_only_columns)
+            lines.append(
+                f"- {len(diff_result.target_only_columns)} column(s) only in target: {cols}"
+            )
+        lines.append("")
+
     if explanations:
         lines += [
             "> **Note:** sections marked **AI explanation** below were generated",
@@ -1060,6 +1111,18 @@ def _print_summary(
         f"{diff_result.target_row_count} target rows."
     )
     typer.echo(f"Matched rows: {diff_result.matched_row_count}")
+
+    if diff_result.has_schema_drift:
+        parts = []
+        if diff_result.source_only_columns:
+            parts.append(f"{len(diff_result.source_only_columns)} only in source")
+        if diff_result.target_only_columns:
+            parts.append(f"{len(diff_result.target_only_columns)} only in target")
+        typer.secho(
+            f"Schema differences: {', '.join(parts)} -- these columns were excluded "
+            "from comparison. See the full report for names.",
+            fg=typer.colors.YELLOW,
+        )
 
     if diff_result.source_only_keys:
         typer.echo(f"Rows only in source: {len(diff_result.source_only_keys)}")

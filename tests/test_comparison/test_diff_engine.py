@@ -267,3 +267,85 @@ def test_empty_fuzzy_match_confidence_dict_keeps_strategy_exact():
 
     result = compare(source, target, join_columns="id", fuzzy_match_confidence={})
     assert result.key_match_strategy == "exact"
+
+
+def test_matching_column_sets_produce_no_schema_drift():
+    """The common case -- same columns on both sides -- must not
+    spuriously report drift just because the columns happen to be
+    supplied in different order (see
+    test_column_order_does_not_affect_comparison below for why order
+    specifically is a non-issue)."""
+    source = pd.DataFrame({"id": [1, 2], "a": [1, 2], "b": [3, 4]})
+    target = pd.DataFrame({"id": [1, 2], "b": [3, 4], "a": [1, 2]})
+
+    result = compare(source, target, join_columns="id")
+    assert result.source_only_columns == []
+    assert result.target_only_columns == []
+    assert result.has_schema_drift is False
+
+
+def test_extra_source_column_is_reported_not_silently_dropped():
+    """
+    Before this, a column present only in source vanished with no
+    trace anywhere in DiffResult -- datacompy's column_stats (and
+    everything diff_engine.py builds from it) only ever covered the
+    intersection. This locks in that the excluded column is now
+    actually visible.
+    """
+    source = pd.DataFrame({"id": [1, 2], "a": [1, 2], "legacy_flag": ["Y", "N"]})
+    target = pd.DataFrame({"id": [1, 2], "a": [1, 2]})
+
+    result = compare(source, target, join_columns="id")
+    assert result.source_only_columns == ["legacy_flag"]
+    assert result.target_only_columns == []
+    assert result.has_schema_drift is True
+    # The excluded column must not leak into value-level comparison
+    # output -- it was never joined against anything on the target
+    # side, so it has nothing to be "compared" against.
+    assert "legacy_flag" not in [c.column for c in result.column_summary]
+    assert result.mismatches_for_column("legacy_flag") == []
+
+
+def test_extra_target_column_is_reported():
+    source = pd.DataFrame({"id": [1, 2], "a": [1, 2]})
+    target = pd.DataFrame({"id": [1, 2], "a": [1, 2], "migrated_at": ["2024-01-01", "2024-01-02"]})
+
+    result = compare(source, target, join_columns="id")
+    assert result.source_only_columns == []
+    assert result.target_only_columns == ["migrated_at"]
+    assert result.has_schema_drift is True
+
+
+def test_columns_only_on_both_sides_reported_independently():
+    """Source dropped one column and gained another relative to
+    target -- both directions must be reported, not just one, and a
+    renamed column (no explicit mapping given) shows up as BOTH a
+    source-only and a target-only entry, since wherefore doesn't
+    guess at renames (see signatures.py's key_format_similarity
+    docstring for why fuzzy name-matching was deliberately rejected
+    for the analogous row-key case)."""
+    source = pd.DataFrame({"id": [1, 2], "cust_id": [10, 20]})
+    target = pd.DataFrame({"id": [1, 2], "customer_id": [10, 20]})
+
+    result = compare(source, target, join_columns="id")
+    assert result.source_only_columns == ["cust_id"]
+    assert result.target_only_columns == ["customer_id"]
+
+
+def test_column_order_does_not_affect_comparison():
+    """
+    Confirmed directly against real datacompy: matching is entirely
+    name-keyed. Locks in that reordering columns on one side produces
+    an IDENTICAL comparison result to the unreordered case -- same
+    mismatches, same schema-drift result (none), regardless of
+    position.
+    """
+    source = pd.DataFrame({"id": [1, 2, 3], "b": [4, 5, 6], "a": [1, 2, 3]})
+    target = pd.DataFrame({"id": [1, 2, 3], "a": [1, 2, 30], "b": [4, 5, 6]})
+
+    result = compare(source, target, join_columns="id")
+    assert result.source_only_columns == []
+    assert result.target_only_columns == []
+    assert result.columns_with_mismatches() == ["a"]
+    assert len(result.mismatches) == 1
+    assert result.mismatches[0].key == {"id": 3}

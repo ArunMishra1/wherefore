@@ -10,6 +10,25 @@ docstring for exactly which datacompy attributes this reads and why.
 Explicitly NOT this file's job: any pattern detection, clustering, or
 causal reasoning. This is the line where "detecting THAT things
 differ" ends and "explaining WHY" begins.
+
+Column-count / schema handling: PandasCompare's join and every
+per-column stat it produces (column_stats, intersect_rows) operate
+strictly on the INTERSECTION of source and target columns -- verified
+directly against datacompy 1.0.2 (a column present on only one side
+never appears in column_stats and is never compared, silently, with
+no warning). Column ORDER, by contrast, is a non-issue: matching is
+entirely name-keyed (confirmed directly -- swapping column order
+between source and target produces identical dc.matches() /
+intersect_rows output), so nothing here or downstream needs to
+account for it.
+
+What's NOT a non-issue is column PRESENCE: dc.df1_unq_columns() /
+dc.df2_unq_columns() carry exactly the columns silently excluded from
+comparison, and this function threads them into
+DiffResult.source_only_columns/target_only_columns so that
+information isn't lost. See DiffResult.has_schema_drift's docstring
+for why this is reported as a plain structural fact rather than run
+through clustering/taxonomy.
 """
 
 from __future__ import annotations
@@ -112,6 +131,18 @@ def compare(
         target_only_rows=_extract_rows(dc.df2_unq_rows, join_columns),
         column_summary=column_summary,
         mismatches=mismatches,
+        # datacompy already computes this (df1_unq_columns/
+        # df2_unq_columns) but it was previously discarded entirely --
+        # column_stats (and everything built from it above) silently
+        # only covers dc.intersect_columns(), so without this a
+        # dropped/renamed column during migration produced NO signal
+        # anywhere in DiffResult. Sorted for stable, diffable output
+        # (datacompy returns an OrderedSet, whose iteration order
+        # reflects insertion order from the source DataFrame's own
+        # column order -- not wrong, just not a guarantee worth
+        # depending on downstream).
+        source_only_columns=sorted(dc.df1_unq_columns()),
+        target_only_columns=sorted(dc.df2_unq_columns()),
         fuzzy_match_confidence=fuzzy_match_confidence,
     )
 
