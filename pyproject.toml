@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wherefore"
-version = "0.3.1"
+version = "0.4.0"
 description = "Explains WHY two datasets differ, in plain English, with eval-backed accuracy claims."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -5,10 +5,31 @@ release dates (GitHub Release + PyPI), not commit dates.
 
 ### Contents
 
+- [0.4.0](#040)
 - [0.3.1](#031)
 - [0.3.0](#030)
 - [0.2.0](#020)
 - [0.1.0](#010)
+
+---
+
+## 0.4.0
+
+### Added
+
+- **Column-count / schema mismatch detection** — source and target no
+  longer need identical column sets. Columns present on only one side
+  (dropped, renamed with no explicit mapping, or newly added) are now
+  surfaced in every report as a `## Schema differences` section and a
+  CLI warning, instead of being silently excluded from comparison with
+  no trace. `compare-dir` batch runs get a per-pair `[SCHEMA]` status
+  and a batch-level tally. No fuzzy rename-guessing is attempted — see
+  `TAXONOMY.md` for why. Confirmed directly against real `datacompy`
+  1.0.2: this data (`df1_unq_columns()`/`df2_unq_columns()`) was
+  already being computed by the underlying comparison engine but
+  discarded before this fix. Column ORDER was separately confirmed to
+  already be a non-issue (matching is entirely name-keyed) — no fix
+  needed there, but locked in with a regression test.
 
 ---
 
